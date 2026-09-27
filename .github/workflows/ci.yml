@@ -37,5 +37,5 @@ jobs:
       - name: Build px0
         run: go build -trimpath -o px0 .
 
-      - name: Run tests
-        run: go test -v ./...
+      - name: Run tests with race detector
+        run: go test -race -v -count=1 ./...
