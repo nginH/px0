@@ -12,7 +12,7 @@ import { showRightInspector, hideRightInspector } from './inspector.js';
 import { overlay, openPalette, closePalette } from './palette.js';
 import { moveCursor, moveCol, moveWord, caretToEdge } from './cursor.js';
 import { showCalls } from './calls.js';
-import { SEL_KEYS, runSelectionAction, selectAll, clearSelectAll, copySelectAll } from './selbar.js';
+import { SEL_KEYS, runSelectionAction, selectAll, clearSelectAll, copySelectAll, getSelectedRangeInfo } from './selbar.js';
 
 import { cycleTheme } from './theme.js';
 import { previewing, togglePreview, previewKey, selectPreview } from './markdown.js';
@@ -32,17 +32,20 @@ export const SHORTCUTS = [
   [['Mod+Shift+P'], 'Command palette'], [['Mod+Shift+O'], 'Go to symbol'],
   [['Mod+Shift+F'], 'Search in files'], [['Mod+Shift+R'], 'Refresh workspace'], [['Mod+F'], 'Find in file'],
   [['Mod+G'], 'Go to line'], [['Mod+D'], 'Toggle diff view (git)'], [['Alt+Z'], 'Toggle word wrap'],
-  [['Alt+M'], 'Toggle Markdown preview'],
+  [['Alt+M'], 'Toggle Markdown / table preview'],
   [['Enter', 'Shift+Enter'], 'Next / previous match'],
   [['F12', 'Mod+Click'], 'Go to definition'], [['Shift+F12'], 'Find all references'],
   [['Alt+Shift+H'], 'Call trail (callers / callees)'],
-  [['Mod+J'], 'Toggle right inspector (Symbols/Refs)'],
+  [['Mod+Shift+M'], 'Show Problems in file'],
+  [['Mod+J'], 'Toggle right sidebar / inspector'],
   [['Alt+Left', 'Alt+Right'], 'Navigate back / forward'], [['Mod+B'], 'Toggle sidebar'],
   [['Alt+W'], 'Close tab'], [['Alt+Shift+T'], 'Reopen closed tab'], [['Ctrl+Tab'], 'Next tab'],
   [['Alt+1…9'], 'Select tab'], [['Double click'], 'Highlight all occurrences'],
   [['Mod+A'], 'Select whole file'],
+  [['Mod+C'], 'Copy selection (source / formatted text)'],
   [['Alt+C', 'Alt+A'], 'Copy selection ref / with context'], [['Alt+U'], 'Find usages of selection'],
   [['Alt+E'], 'Edit selection inline'],
+  [['Alt+T'], 'Start a thread on the selection'],
   [['Right click'], 'Selection actions at the pointer'],
   [['Mod+Home|Mod+Up', 'Mod+End|Mod+Down'], 'Top / bottom of file'],
   [['Home|Mod+Left', 'End|Mod+Right'], 'Start / end of line'],
@@ -130,12 +133,13 @@ export function initShortcuts() {
 
     if (mod && (e.key === 'j' || e.key === 'J')) {
       e.preventDefault();
-      if (document.body.classList.contains('right-hidden')) showRightInspector('refs');
+      if (document.body.classList.contains('right-hidden')) showRightInspector();
       else hideRightInspector();
       return;
     }
 
     if (mod && e.shiftKey && (e.key === 'P' || e.key === 'p')) { e.preventDefault(); openPalette('command'); return; }
+    if (mod && e.shiftKey && (e.key === 'M' || e.key === 'm')) { e.preventDefault(); showRightInspector('problems'); return; }
     if (mod && e.shiftKey && (e.key === 'O' || e.key === 'o')) { e.preventDefault(); showRightInspector('symbols'); return; }
     if (mod && e.shiftKey && (e.key === 'F' || e.key === 'f')) { e.preventDefault(); showRightInspector('search'); $('#q')?.select(); return; }
     if (mod && e.shiftKey && (e.key === 'R' || e.key === 'r')) { e.preventDefault(); reindexWorkspace(); return; }
@@ -181,7 +185,7 @@ export function initShortcuts() {
       return;
     }
 
-    if (mod && !e.shiftKey && !e.altKey && e.key === 'Enter') {
+    if (mod && e.shiftKey && !e.altKey && e.key === 'Enter') {
       const b = $('#agentbox');
       if (b && !b.hidden) {
         e.preventDefault();
@@ -201,7 +205,15 @@ export function initShortcuts() {
     // Select all takes the open file only, never the sidebar or status bar around it.
     const plainMod = mod && !e.shiftKey && !e.altKey;
     if (plainMod && (e.key === 'a' || e.key === 'A')) { e.preventDefault(); if (previewing()) selectPreview(); else selectAll(); return; }
-    if (plainMod && (e.key === 'c' || e.key === 'C') && copySelectAll()) { e.preventDefault(); return; }
+    if (plainMod && (e.key === 'c' || e.key === 'C')) {
+      if (copySelectAll()) { e.preventDefault(); return; }
+      const info = getSelectedRangeInfo();
+      if (info) {
+        e.preventDefault();
+        runSelectionAction(info.isMarkdownPreview ? 'copy-preview-text' : 'copy-source');
+        return;
+      }
+    }
 
     if (handleVimKeyDown(e)) return;
 

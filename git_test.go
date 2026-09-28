@@ -93,7 +93,7 @@ func TestGitStatus(t *testing.T) {
 		t.Errorf("keep.go should have no status, got %q", st["keep.go"])
 	}
 
-	// Overlay onto tree nodes. Deleted/old-rename paths have no node on disk.
+	// Overlay onto tree nodes. Deleted files appear with status "D".
 	ix := NewIndex(root)
 	ix.Build()
 	byName := map[string]Node{}
@@ -110,6 +110,7 @@ func TestGitStatus(t *testing.T) {
 		"add.go":  "A",
 		"untr.go": "U",
 		"ren2.go": "R",
+		"del.go":  "D",
 		"keep.go": "",
 	}
 	for name, code := range nodeWant {
@@ -1185,6 +1186,169 @@ func TestGitStagedDiffTruncation(t *testing.T) {
 	// The diff output should be around 32KB + truncation message
 	if len(diff) > 34*1024 {
 		t.Fatalf("diff size %d exceeded expected bound", len(diff))
+	}
+}
+
+func TestDeletedFileHandling(t *testing.T) {
+	if !gitInstalled() {
+		t.Skip("git not installed")
+	}
+	dir := t.TempDir()
+	gitTestRun(t, dir, "init", "-b", "main")
+	for _, cfg := range [][2]string{{"user.email", "t@example.com"}, {"user.name", "T"}, {"commit.gpgsign", "false"}} {
+		gitTestRun(t, dir, "config", cfg[0], cfg[1])
+	}
+	// Create root file and nested file
+	os.WriteFile(filepath.Join(dir, "root.txt"), []byte("root file content\n"), 0o644)
+	os.MkdirAll(filepath.Join(dir, "sub", "inner"), 0o755)
+	os.WriteFile(filepath.Join(dir, "sub", "inner", "nested.txt"), []byte("nested file content\n"), 0o644)
+	gitTestRun(t, dir, "add", "-A")
+	gitTestRun(t, dir, "commit", "-m", "initial commit")
+
+	// Delete root.txt and the entire sub directory from working tree
+	if err := os.Remove(filepath.Join(dir, "root.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(filepath.Join(dir, "sub")); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Verify Index.Build includes root.txt and sub/inner/nested.txt as "D"
+	ix := NewIndex(dir)
+	ix.Build()
+
+	rootKids, ok := ix.Children("")
+	if !ok {
+		t.Fatal("ix.Children(\"\") failed")
+	}
+	var rootNode, subDirNode *Node
+	for i := range rootKids {
+		if rootKids[i].Name == "root.txt" {
+			rootNode = &rootKids[i]
+		}
+		if rootKids[i].Name == "sub" {
+			subDirNode = &rootKids[i]
+		}
+	}
+	if rootNode == nil {
+		t.Fatal("expected root.txt to be present in ix.Children(\"\")")
+	}
+	if rootNode.Dir || rootNode.Status != "D" {
+		t.Fatalf("expected root.txt to have Dir=false, Status=\"D\", got %+v", rootNode)
+	}
+	if subDirNode == nil || !subDirNode.Dir || !subDirNode.Dirty {
+		t.Fatalf("expected sub to be Dir=true and Dirty=true, got %+v", subDirNode)
+	}
+
+	subKids, ok := ix.Children("sub")
+	if !ok {
+		t.Fatal("ix.Children(\"sub\") failed")
+	}
+	var innerDirNode *Node
+	for i := range subKids {
+		if subKids[i].Name == "inner" {
+			innerDirNode = &subKids[i]
+		}
+	}
+	if innerDirNode == nil || !innerDirNode.Dir || !innerDirNode.Dirty {
+		t.Fatalf("expected sub/inner to be Dir=true and Dirty=true, got %+v", innerDirNode)
+	}
+
+	innerKids, ok := ix.Children("sub/inner")
+	if !ok {
+		t.Fatal("ix.Children(\"sub/inner\") failed")
+	}
+	var nestedNode *Node
+	for i := range innerKids {
+		if innerKids[i].Name == "nested.txt" {
+			nestedNode = &innerKids[i]
+		}
+	}
+	if nestedNode == nil || nestedNode.Dir || nestedNode.Status != "D" {
+		t.Fatalf("expected sub/inner/nested.txt to have Status=\"D\", got %+v", nestedNode)
+	}
+
+	// 2. Test /api/file and /api/diff endpoints for deleted file
+	srv := NewServer(ix, newLSPManager(ix.Root(), false))
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	// /api/file for deleted root.txt
+	resp, err := http.Get(ts.URL + "/api/file?path=root.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("/api/file?path=root.txt returned status %d, want 200", resp.StatusCode)
+	}
+	var fileData map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&fileData); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if fileData["deleted"] != true {
+		t.Fatalf("expected deleted=true, got %v", fileData["deleted"])
+	}
+	if fileData["diffAvailable"] != true {
+		t.Fatalf("expected diffAvailable=true, got %v", fileData["diffAvailable"])
+	}
+	if fileData["total"] != float64(0) {
+		t.Fatalf("expected total=0, got %v", fileData["total"])
+	}
+
+	// /api/diff for deleted root.txt
+	diffResp, err := http.Get(ts.URL + "/api/diff?path=root.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if diffResp.StatusCode != http.StatusOK {
+		t.Fatalf("/api/diff?path=root.txt returned status %d, want 200", diffResp.StatusCode)
+	}
+	var diffData map[string]any
+	if err := json.NewDecoder(diffResp.Body).Decode(&diffData); err != nil {
+		t.Fatal(err)
+	}
+	diffResp.Body.Close()
+	if diffData["available"] != true {
+		t.Fatalf("expected diff available=true, got %v", diffData["available"])
+	}
+	diffStr, _ := diffData["diff"].(string)
+	if !strings.Contains(diffStr, "-root file content") {
+		t.Fatalf("expected diff to show deleted line, got:\n%s", diffStr)
+	}
+
+	// 3. Test restoring a file (git checkout -- root.txt)
+	gitTestRun(t, dir, "checkout", "--", "root.txt")
+	_, _, changed, statuses, _, _, _, _ := ix.UpdateGitStatus()
+	if !changed {
+		t.Fatal("expected UpdateGitStatus to report changed=true on restore")
+	}
+	if statuses["root.txt"] != "" {
+		t.Fatalf("expected root.txt status to be clean, got %q", statuses["root.txt"])
+	}
+	rootKidsAfter, _ := ix.Children("")
+	for _, k := range rootKidsAfter {
+		if k.Name == "root.txt" {
+			if k.Status != "" {
+				t.Fatalf("expected restored file to have Status=\"\", got %q", k.Status)
+			}
+		}
+	}
+
+	// 4. Test committing deletion of sub/inner/nested.txt
+	gitTestRun(t, dir, "rm", "-rf", "sub")
+	gitTestRun(t, dir, "commit", "-m", "remove sub")
+	ix.UpdateGitStatus()
+
+	// sub and sub/inner should now be removed from ix.children because they are empty and not on disk
+	if _, ok := ix.Children("sub"); ok {
+		t.Fatal("expected sub directory to be removed from children after commit")
+	}
+	rootKidsFinal, _ := ix.Children("")
+	for _, k := range rootKidsFinal {
+		if k.Name == "sub" {
+			t.Fatal("expected sub entry to be removed from root children after commit")
+		}
 	}
 }
 

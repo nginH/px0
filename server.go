@@ -29,18 +29,8 @@ import (
 //go:embed web
 var embedded embed.FS
 
-// assets is the embedded web/ directory, or the one on disk under -dev.
+// assets is the embedded web/ directory.
 var assets fs.FS = embedded
-
-// useDiskAssets serves web/ from the filesystem so the UI can be edited without
-// rebuilding. Development convenience only.
-func useDiskAssets(dir string) error {
-	if _, err := os.Stat(filepath.Join(dir, "web", "index.html")); err != nil {
-		return err
-	}
-	assets = os.DirFS(dir)
-	return nil
-}
 
 func cleanBasePath(p string) string {
 	p = strings.TrimSpace(p)
@@ -62,10 +52,11 @@ func cleanBasePath(p string) string {
 type Server struct {
 	ix        *Index
 	lsp       *lspManager
-	agent     *agentManager // nil unless main wires editing for this session
-	pr        *prSession    // nil unless main launched this process as `px0 pr ...`
-	diffBase  string        // ref /api/diff and /api/gutter diff against; "HEAD" unless in PR mode
-	prHeadSHA string        // PR mode only: the checked-out PR head commit. Frozen boundary between
+	agent     *agentManager  // nil unless main wires editing for this session
+	threads   *threadManager // nil unless editing is wired: threads run on the same harness
+	pr        *prSession     // nil unless main launched this process as `px0 pr ...`
+	diffBase  string         // ref /api/diff and /api/gutter diff against; "HEAD" unless in PR mode
+	prHeadSHA string         // PR mode only: the checked-out PR head commit. Frozen boundary between
 	// the PR's own diff (diffBase..prHeadSHA) and the reviewer's local edits
 	// since checkout (prHeadSHA..working tree); refreshed on Pull.
 	gitWatcher *GitWatcher
@@ -133,6 +124,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc(s.routePath("/api/close"), s.handleClose)
 	s.mux.HandleFunc(s.routePath("/api/raw"), s.handleRaw)
 	s.mux.HandleFunc(s.routePath("/api/markdown"), s.handleMarkdown)
+	s.mux.HandleFunc(s.routePath("/api/table"), s.handleTable)
 	s.mux.HandleFunc(s.routePath("/api/diff"), s.handleDiff)
 	s.mux.HandleFunc(s.routePath("/api/gutter"), s.handleGutter)
 	s.mux.HandleFunc(s.routePath("/api/stream"), s.handleEventStream)
@@ -154,16 +146,26 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc(s.routePath("/api/lsp/calls"), s.handleLSPCalls)
 	s.mux.HandleFunc(s.routePath("/api/lsp/symbols"), s.handleLSPSymbols)
 	s.mux.HandleFunc(s.routePath("/api/lsp/hover"), s.handleLSPHover)
+	s.mux.HandleFunc(s.routePath("/api/lsp/problems"), s.handleLSPProblems)
 	s.mux.HandleFunc(s.routePath("/api/lsp/warm"), s.handleLSPWarm)
 	s.mux.HandleFunc(s.routePath("/api/lsp/setup"), s.handleLSPSetup)
 	s.mux.HandleFunc(s.routePath("/api/lsp/install"), s.handleLSPInstall)
 	s.mux.HandleFunc(s.routePath("/api/lsp/start"), s.handleLSPStart)
+	s.mux.HandleFunc(s.routePath("/api/lsp/stop"), s.handleLSPStop)
+	s.mux.HandleFunc(s.routePath("/api/lsp/servers"), s.handleLSPServers)
 	s.mux.HandleFunc(s.routePath("/api/agent/harnesses"), s.handleAgentHarnesses)
 	s.mux.HandleFunc(s.routePath("/api/agent/select"), s.handleAgentSelect)
 	s.mux.HandleFunc(s.routePath("/api/agent/edit"), s.handleAgentEdit)
 	s.mux.HandleFunc(s.routePath("/api/agent/batch"), s.handleAgentBatchEdit)
 	s.mux.HandleFunc(s.routePath("/api/agent/job"), s.handleAgentJob)
 	s.mux.HandleFunc(s.routePath("/api/agent/cancel"), s.handleAgentCancel)
+	s.mux.HandleFunc(s.routePath("/api/threads"), s.handleThreads)
+	s.mux.HandleFunc(s.routePath("/api/threads/get"), s.handleThreadGet)
+	s.mux.HandleFunc(s.routePath("/api/threads/create"), s.handleThreadCreate)
+	s.mux.HandleFunc(s.routePath("/api/threads/send"), s.handleThreadSend)
+	s.mux.HandleFunc(s.routePath("/api/threads/cancel"), s.handleThreadCancel)
+	s.mux.HandleFunc(s.routePath("/api/threads/delete"), s.handleThreadDelete)
+	s.mux.HandleFunc(s.routePath("/api/threads/stream"), s.handleThreadStream)
 	s.mux.HandleFunc(s.routePath("/api/settings"), s.handleSettings)
 	s.mux.HandleFunc(s.routePath("/api/pr/meta"), s.handlePRMeta)
 	s.mux.HandleFunc(s.routePath("/api/pr/comments"), s.handlePRComments)
@@ -219,6 +221,8 @@ func (s *Server) scavenge() {
 	}
 }
 
+const contentSecurityPolicy = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https: http:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'none';"
+
 // ServeHTTP delegates incoming HTTP requests to the configured ServeMux,
 // recording request timing and updating access timestamps.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -261,6 +265,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	var out http.ResponseWriter = rec
 	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Security-Policy", contentSecurityPolicy)
 	if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") && !isSSE {
 		w.Header().Set("Content-Encoding", "gzip")
 		w.Header().Add("Vary", "Accept-Encoding")
@@ -409,6 +414,7 @@ func fail(w http.ResponseWriter, code int, msg string) {
 func (s *Server) SetAgent(a *agentManager) {
 	s.agent = a
 	if a != nil {
+		s.threads = newThreadManager(a, s.ix.Root())
 		a.onEdit = func() {
 			if s.gitWatcher != nil {
 				s.gitWatcher.Trigger()
@@ -690,7 +696,7 @@ func (s *Server) handleLSPCalls(w http.ResponseWriter, r *http.Request) {
 // by the time the reader wants to hover or jump, and so the status indicator
 // reflects reality without anyone having to ask a question first.
 func (s *Server) handleLSPWarm(w http.ResponseWriter, r *http.Request) {
-	_, rel, ok := s.resolvePath(r.URL.Query().Get("path"))
+	abs, rel, ok := s.resolvePath(r.URL.Query().Get("path"))
 	if !ok {
 		fail(w, 400, "bad path")
 		return
@@ -705,8 +711,60 @@ func (s *Server) handleLSPWarm(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(ms)*time.Millisecond)
 	defer cancel()
 	// The spawn keeps going even when this call gives up waiting on it.
-	s.lsp.client(ctx, rel)
+	_ = s.lsp.EnsureOpen(ctx, abs, rel)
 	writeJSON(w, s.lspBrief(rel))
+}
+
+func (s *Server) handleLSPProblems(w http.ResponseWriter, r *http.Request) {
+	abs, rel, ok := s.resolvePath(r.URL.Query().Get("path"))
+	if !ok {
+		fail(w, 400, "bad path")
+		return
+	}
+	ms, _ := strconv.Atoi(r.URL.Query().Get("wait"))
+	if ms < 0 {
+		ms = 0
+	}
+	if ms > 10000 {
+		ms = 10000
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(ms)*time.Millisecond)
+	defer cancel()
+
+	probs, err := s.lsp.Problems(ctx, abs, rel, ms)
+	state, srv := s.lsp.State(rel)
+
+	counts := map[string]int{
+		"error":   0,
+		"warning": 0,
+		"info":    0,
+		"hint":    0,
+		"total":   len(probs),
+	}
+	for _, p := range probs {
+		switch p.SeverityNum {
+		case 1:
+			counts["error"]++
+		case 2:
+			counts["warning"]++
+		case 3:
+			counts["info"]++
+		case 4:
+			counts["hint"]++
+		}
+	}
+
+	resp := map[string]any{
+		"path":     rel,
+		"problems": probs,
+		"counts":   counts,
+		"state":    string(state),
+		"server":   srv,
+	}
+	if err != nil && err != context.DeadlineExceeded && err != context.Canceled {
+		resp["error"] = err.Error()
+	}
+	writeJSON(w, resp)
 }
 
 func (s *Server) handleLSPHover(w http.ResponseWriter, r *http.Request) {
@@ -801,6 +859,18 @@ var imageExt = map[string]bool{
 	".svg": true, ".ico": true, ".bmp": true, ".avif": true,
 }
 
+var imageMime = map[string]string{
+	".png":  "image/png",
+	".jpg":  "image/jpeg",
+	".jpeg": "image/jpeg",
+	".gif":  "image/gif",
+	".webp": "image/webp",
+	".svg":  "image/svg+xml",
+	".ico":  "image/x-icon",
+	".bmp":  "image/bmp",
+	".avif": "image/avif",
+}
+
 func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	abs, rel, ok := s.resolvePath(q.Get("path"))
@@ -810,6 +880,33 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 	}
 	st, err := os.Stat(abs)
 	if err != nil {
+		if os.IsNotExist(err) && gitAvailable(s.ix.Root()) {
+			diffAvail := false
+			if s.pr != nil {
+				diffAvail = gitDiffAgainst(s.ix.Root(), rel, s.diffBase) != "" ||
+					gitDiffBetween(s.ix.Root(), rel, s.diffBase, s.prHeadSHA) != "" ||
+					gitDiffAgainst(s.ix.Root(), rel, s.prHeadSHA) != ""
+			} else {
+				diffAvail = gitDiffAgainst(s.ix.Root(), rel, s.diffBase) != ""
+			}
+			if diffAvail {
+				d := newDoc("", rel)
+				if uiVerbose {
+					uiStatus("info", "view", fmt.Sprintf("%s · deleted (0 bytes)", rel), 0, os.Stdout)
+				}
+				writeJSON(w, map[string]any{
+					"path": rel, "lang": d.Lang, "total": 0, "maxCols": 0,
+					"start": 0, "lines": []string{}, "size": 0,
+					"exact": true, "refine": false,
+					"markdown":      isMarkdown(rel),
+					"table":         isTable(rel),
+					"diffAvailable": true,
+					"deleted":       true,
+					"lsp":           s.lspBrief(rel),
+				})
+				return
+			}
+		}
 		fail(w, 404, err.Error())
 		return
 	}
@@ -857,6 +954,7 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 		"start": start, "lines": lines, "size": st.Size(),
 		"exact": exact, "refine": !exact && coming,
 		"markdown":      isMarkdown(rel),
+		"table":         isTable(rel),
 		"diffAvailable": diffAvail,
 		"lsp":           s.lspBrief(rel),
 	})
@@ -875,15 +973,38 @@ func (s *Server) handleClose(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"ok": true, "path": rel})
 }
 
+func setRawHeaders(w http.ResponseWriter, rel string) {
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	base := filepath.Base(rel)
+	cd := mime.FormatMediaType("attachment", map[string]string{
+		"filename": base,
+	})
+	if cd == "" {
+		cd = fmt.Sprintf(`attachment; filename=%q`, base)
+	}
+	w.Header().Set("Content-Disposition", cd)
+
+	ext := strings.ToLower(filepath.Ext(rel))
+	ct := ""
+	if imageExt[ext] {
+		ct = mime.TypeByExtension(ext)
+		if ct == "" {
+			ct = imageMime[ext]
+		}
+	}
+	if ct == "" || !strings.HasPrefix(ct, "image/") {
+		ct = "application/octet-stream"
+	}
+	w.Header().Set("Content-Type", ct)
+}
+
 func (s *Server) handleRaw(w http.ResponseWriter, r *http.Request) {
 	abs, rel, ok := s.safePath(r.URL.Query().Get("path"))
 	if !ok {
 		fail(w, 400, "bad path")
 		return
 	}
-	if ct := mime.TypeByExtension(filepath.Ext(rel)); ct != "" {
-		w.Header().Set("Content-Type", ct)
-	}
+	setRawHeaders(w, rel)
 	http.ServeFile(w, r, abs)
 }
 
@@ -913,12 +1034,18 @@ func (s *Server) handleDiff(w http.ResponseWriter, r *http.Request) {
 		uiStatus("info", "diff", fmt.Sprintf("%s · %s", rel, status), 0, os.Stdout)
 	}
 	avail := diff != ""
-	resp := map[string]any{"path": rel, "diff": diff}
+	resp := map[string]any{
+		"path":  rel,
+		"diff":  diff,
+		"hunks": highlightDiff(rel, diff),
+	}
 	if s.pr != nil {
 		prDiff := gitDiffBetween(s.ix.Root(), rel, s.diffBase, s.prHeadSHA)
 		yourDiff := gitDiffAgainst(s.ix.Root(), rel, s.prHeadSHA)
 		resp["prDiff"] = prDiff
 		resp["yourDiff"] = yourDiff
+		resp["prHunks"] = highlightDiff(rel, prDiff)
+		resp["yourHunks"] = highlightDiff(rel, yourDiff)
 		avail = avail || prDiff != "" || yourDiff != ""
 	}
 	resp["available"] = avail
@@ -1422,6 +1549,9 @@ func (s *Server) handleReindex(w http.ResponseWriter, r *http.Request) {
 	if s.gitWatcher != nil {
 		s.gitWatcher.Trigger()
 	}
+	if s.lsp != nil {
+		s.lsp.RefreshOpenDocs()
+	}
 	n, _, ms := s.ix.Stats()
 	gitCount, gitFiles := s.ix.GitChanges()
 	writeJSON(w, map[string]any{"files": n, "indexMs": ms, "gitChanges": gitCount, "gitFiles": gitFiles})
@@ -1488,5 +1618,12 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		})
 	default:
 		fail(w, 405, "method not allowed")
+	}
+}
+
+// CloseThreads stops every thread turn still running at shutdown.
+func (s *Server) CloseThreads() {
+	if s.threads != nil {
+		s.threads.Close()
 	}
 }

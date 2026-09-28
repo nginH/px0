@@ -1,5 +1,5 @@
 // web/src/renderer.js
-import { $, S, doc_, api, LH, CHUNK, OVERSCAN } from './state.js';
+import { $, S, doc_, api, esc, LH, CHUNK, OVERSCAN } from './state.js';
 import { vp, sizer, rowsEl, editor } from './ui.js';
 
 export function measure() {
@@ -85,8 +85,16 @@ export function paint() {
       if (m) gc += m === 'add' ? ' gut-add' : ' gut-mod';
       if (gut.dels.has(n)) rc += ' gut-del';
     }
+    let probTitle = '';
+    if (d.problemsByLine && d.problemsByLine.has(n)) {
+      const probs = d.problemsByLine.get(n);
+      const worst = probs[0].severityNum;
+      gc += worst === 1 ? ' prob-err' : (worst === 2 ? ' prob-warn' : ' prob-info');
+      probTitle = esc(probs.map(p => p.message).join(' • '));
+    }
+    const gTitleAttr = probTitle ? ' title="' + probTitle + '"' : '';
     html += '<div class="' + rc + '" data-l="' + n + '">' +
-      '<div class="' + gc + '"><span class="line-btn" role="button" data-l="' + n + '" title="Edit inline">✎</span>' + n + '</div><div class="c">' + (body === undefined ? '' : body) + '</div></div>';
+      '<div class="' + gc + '"' + gTitleAttr + '><span class="line-btn" role="button" data-l="' + n + '" title="Thread and line actions">Edit</span>' + n + '</div><div class="c">' + (body === undefined ? '' : body) + '</div></div>';
   }
   const sel = saveSelection();
   rowsEl.style.transform = 'translateY(' + (first * LH) + 'px)';

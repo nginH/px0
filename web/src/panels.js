@@ -7,8 +7,11 @@ import { treeEl, refreshTree, setSidebarMode } from './tree.js';
 import { reloadOpenTabs } from './tabs.js';
 import { showToast } from './ui.js';
 
-export function showPanel(name) {
+export async function showPanel(name) {
   document.body.classList.remove('side-hidden');
+  if (name === 'files') {
+    await setSidebarMode('files');
+  }
   layout();
   render();
 }

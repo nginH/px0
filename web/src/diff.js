@@ -4,10 +4,14 @@
 // side-by-side split layout (default) or a single-column unified layout.
 // Unlike the code viewport this is not virtualized -- a file's own diff is
 // bounded in size, so a plain DOM render is simple and fast enough.
-import { $, S, doc_, esc, api } from './state.js';
+import { $, S, doc_, esc, api, MOD } from './state.js';
 import { on } from './bus.js';
 import { syncPreview } from './markdown.js';
 import { setStatusNote, updateStatus } from './status.js';
+import { wordAtPoint } from './cursor.js';
+import { gotoDefinition } from './lsp.js';
+import { hoverAt } from './hover.js';
+import { pushHistory } from './history.js';
 
 export const diffview = $('#diffview');
 const diffContent = $('#diffcontent');
@@ -88,13 +92,13 @@ async function drawDiff(d, force = false) {
       d.diffReq = api('/api/diff', { path: d.path });
       const j = await d.diffReq;
       d.diffText = j.diff || '';
-      d.diffHunks = parseDiff(d.diffText);
+      d.diffHunks = j.hunks || parseDiff(d.diffText);
       // In a PR review session the server also splits the diff at the PR's
       // checked-out head commit: prDiff is the PR's own change (frozen since
       // checkout/last Pull), yourDiff is whatever the reviewer has edited or
       // committed locally since then. Undefined outside PR mode.
-      d.prDiffHunks = j.prDiff !== undefined ? parseDiff(j.prDiff) : undefined;
-      d.yourDiffHunks = j.yourDiff !== undefined ? parseDiff(j.yourDiff) : undefined;
+      d.prDiffHunks = j.prHunks !== undefined ? j.prHunks : (j.prDiff !== undefined ? parseDiff(j.prDiff) : undefined);
+      d.yourDiffHunks = j.yourHunks !== undefined ? j.yourHunks : (j.yourDiff !== undefined ? parseDiff(j.yourDiff) : undefined);
     } catch (e) {
       d.diffText = '';
       d.diffHunks = [];
@@ -110,6 +114,20 @@ async function drawDiff(d, force = false) {
   if (d.diffScroll) {
     diffview.scrollTop = d.diffScroll;
     d.diffScroll = 0;
+  } else if (d.cur) {
+    scrollDiffToLine(d.cur);
+  }
+}
+
+export function scrollDiffToLine(line) {
+  if (!diffview || !line) return;
+  const row = diffview.querySelector(`[data-l="${line}"]`) ||
+              diffview.querySelector(`[data-at="${line}"]`) ||
+              diffview.querySelector(`[data-old-l="${line}"]`);
+  if (row) {
+    row.scrollIntoView({ block: 'center', behavior: 'auto' });
+    row.classList.add('diff-row-flash');
+    setTimeout(() => row.classList.remove('diff-row-flash'), 1200);
   }
 }
 
@@ -305,7 +323,7 @@ function unifiedTable(hunk, reviewable = true) {
       lineCell(row.type === 'add' ? '' : row.oldLine, reviewable),
       lineCell(row.type === 'del' ? '' : row.newLine, reviewable),
       markerCell(row.type),
-      codeCell(row.text),
+      codeCell(row),
     );
     table.append(r);
   }
@@ -347,10 +365,10 @@ function pairRows(rows) {
 function splitSide(row, side, reviewable = true) {
   const el = document.createElement('div');
   el.className = 'diff-side diff-side-' + side + (row ? ' diff-' + row.type : ' diff-blank');
-  if (!row) { el.append(lineCell('', reviewable), markerCell(''), codeCell('')); return el; }
+  if (!row) { el.append(lineCell('', reviewable), markerCell(''), codeCell(null)); return el; }
   const ln = side === 'left' ? row.oldLine : row.newLine;
   anchor(el, row, reviewable);
-  el.append(lineCell(ln, reviewable), markerCell(row.type), codeCell(row.text));
+  el.append(lineCell(ln, reviewable), markerCell(row.type), codeCell(row));
   return el;
 }
 
@@ -376,12 +394,20 @@ function lineCell(n, reviewable = true) {
   el.className = 'diff-ln';
   if (n !== '' && n !== undefined) {
     el.classList.add('diff-ln-nav');
-    el.title = 'Open in file view at line ' + n;
+    let title = 'Open in file view at line ' + n;
+    const d = doc_();
+    if (d && d.problemsByLine && d.problemsByLine.has(+n)) {
+      const pList = d.problemsByLine.get(+n);
+      const worst = pList[0].severityNum;
+      el.classList.add(worst === 1 ? 'prob-err' : (worst === 2 ? 'prob-warn' : 'prob-info'));
+      title += ' · ' + pList.map(p => p.message).join(' • ');
+    }
+    el.title = title;
     const btn = document.createElement('span');
     btn.className = 'line-btn';
     btn.setAttribute('role', 'button');
-    btn.title = (S.meta?.pr && reviewable) ? 'Add review comment' : 'Edit inline';
-    btn.textContent = '✎';
+    btn.title = (S.meta?.pr && reviewable) ? 'Thread, review comment and line actions' : 'Thread and line actions';
+    btn.textContent = 'Edit';
     el.append(btn);
   }
   el.append(document.createTextNode(n === '' || n === undefined ? '' : String(n)));
@@ -397,10 +423,18 @@ function markerCell(type) {
   return el;
 }
 
-function codeCell(text) {
+function codeCell(arg) {
   const el = document.createElement('div');
   el.className = 'diff-code';
-  el.innerHTML = esc(text || '') || '&nbsp;';
+  if (!arg) {
+    el.innerHTML = '&nbsp;';
+    return el;
+  }
+  if (typeof arg === 'string') {
+    el.innerHTML = esc(arg) || '&nbsp;';
+    return el;
+  }
+  el.innerHTML = arg.html || esc(arg.text || '') || '&nbsp;';
   return el;
 }
 
@@ -417,18 +451,54 @@ export function initDiff() {
     if (line && sourceJumpHandler) sourceJumpHandler(line);
     else setDiffMode('source');
   });
+  diffContent.addEventListener('mousedown', e => {
+    if (e.button !== 0) return;
+    if (e.target.closest('.line-btn') || e.target.closest('.diff-ln-nav')) return;
+    const diffCode = e.target.closest('.diff-code');
+    if (!diffCode) return;
+    const w = wordAtPoint(e.clientX, e.clientY);
+    if (!w) return;
+    S.at = w;
+    S.lastWord = w.word;
+    const d = doc_();
+    if (e[MOD]) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (d) pushHistory(d.path, w.line);
+      const targetView = e.altKey ? 'diff' : 'source';
+      gotoDefinition(w, { view: targetView });
+      return;
+    }
+  });
+
   // Clicking a line number jumps straight to the full file at that line --
   // the diff shows what changed, but reading it usually means seeing it in
-  // context, not just the hunk.
+  // context, not just the hunk. Clicking a symbol highlights and opens hover actions.
   diffContent.addEventListener('click', e => {
     if (e.target.closest('.line-btn')) return;
     const cell = e.target.closest('.diff-ln-nav');
-    if (!cell) return;
-    const rowEl = cell.closest('[data-l], [data-at]');
-    if (!rowEl || !sourceJumpHandler) return;
-    e.stopPropagation();
-    const line = rowEl.dataset.l !== undefined ? +rowEl.dataset.l : +rowEl.dataset.at;
-    sourceJumpHandler(line);
+    if (cell) {
+      const rowEl = cell.closest('[data-l], [data-at]');
+      if (!rowEl || !sourceJumpHandler) return;
+      e.stopPropagation();
+      const line = rowEl.dataset.l !== undefined ? +rowEl.dataset.l : +rowEl.dataset.at;
+      sourceJumpHandler(line);
+      return;
+    }
+    const diffCode = e.target.closest('.diff-code');
+    if (diffCode && !e[MOD]) {
+      const w = wordAtPoint(e.clientX, e.clientY);
+      if (w) {
+        S.at = w;
+        S.lastWord = w.word;
+        hoverAt(e.clientX, e.clientY);
+      }
+    }
+  });
+
+  diffContent.addEventListener('dblclick', e => {
+    const w = wordAtPoint(e.clientX, e.clientY);
+    if (w) { S.at = w; S.lastWord = w.word; }
   });
   $('#diff-btn')?.addEventListener('click', e => {
     e.stopPropagation();

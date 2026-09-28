@@ -189,6 +189,14 @@ const BUILTIN_SCHEMA = [
     default: true
   },
   {
+    key: "table.preview.open",
+    title: "Table View",
+    description: "Controls whether CSV and TSV files open as a table by default.",
+    category: "Workbench",
+    type: "boolean",
+    default: true
+  },
+  {
     key: "explorer.compactFolders",
     title: "Compact Folders",
     description: "Controls whether the file tree renders single-child directory chains compactly.",
@@ -198,7 +206,7 @@ const BUILTIN_SCHEMA = [
   },
   {
     key: "explorer.autoReveal",
-    title: "Auto Reveal Active File",
+    title: "Auto Reveal",
     description: "Controls whether the file explorer automatically scrolls to and reveals active tabs.",
     category: "Files & Explorer",
     type: "boolean",
@@ -305,10 +313,29 @@ const COMMONLY_USED_KEYS = new Set([
   'diffEditor.renderSideBySide',
   'editor.cursorStyle',
   'explorer.autoReveal',
+  'explorer.autoRelveal',
   'search.smartCase',
   'lsp.hover.enabled',
   'agent.harness',
 ]);
+
+export function isAutoRevealEnabled() {
+  if (S.settings) {
+    if (S.settings['explorer.autoReveal'] !== undefined) {
+      return S.settings['explorer.autoReveal'] === true || S.settings['explorer.autoReveal'] === 'true';
+    }
+    if (S.settings['explorer.autoRelveal'] !== undefined) {
+      return S.settings['explorer.autoRelveal'] === true || S.settings['explorer.autoRelveal'] === 'true';
+    }
+    if (S.settings['autoReveal'] !== undefined) {
+      return S.settings['autoReveal'] === true || S.settings['autoReveal'] === 'true';
+    }
+    if (S.settings['autoRelveal'] !== undefined) {
+      return S.settings['autoRelveal'] === true || S.settings['autoRelveal'] === 'true';
+    }
+  }
+  return true;
+}
 
 export async function loadSettings() {
   try {
@@ -399,8 +426,22 @@ export function applySettingLive(key, val) {
       try { localStorage.setItem('px0.mdPreview', S.mdPreview ? 'true' : 'false'); } catch {}
       break;
     }
+    case 'table.preview.open': {
+      S.tablePreview = val === true || val === 'true';
+      try { localStorage.setItem('px0.tablePreview', S.tablePreview ? 'true' : 'false'); } catch {}
+      break;
+    }
     case 'editor.vimMode': {
       setVimModeEnabled(val === true || val === 'true', false);
+      break;
+    }
+    case 'explorer.autoReveal':
+    case 'explorer.autoRelveal':
+    case 'autoReveal':
+    case 'autoRelveal': {
+      const on = val === true || val === 'true';
+      S.settings['explorer.autoReveal'] = on;
+      S.settings['explorer.autoRelveal'] = on;
       break;
     }
   }
@@ -566,7 +607,9 @@ function renderSettingsList() {
       const key = (s.key || s.Key || '').toLowerCase();
       const desc = (s.description || s.Description || '').toLowerCase();
       const cat = (s.category || s.Category || '').toLowerCase();
-      return title.includes(q) || key.includes(q) || desc.includes(q) || cat.includes(q);
+      const isAutoReveal = key === 'explorer.autoreveal' || key === 'explorer.autorelveal';
+      const matchTypo = isAutoReveal && (q.includes('relveal') || q.includes('reveal'));
+      return title.includes(q) || key.includes(q) || desc.includes(q) || cat.includes(q) || matchTypo;
     });
   } else if (activeSettingsCategory === 'Commonly Used') {
     items = schema.filter(s => COMMONLY_USED_KEYS.has(s.key || s.Key));

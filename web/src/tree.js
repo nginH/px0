@@ -1,9 +1,14 @@
 // web/src/tree.js
 import { $, $$, esc, api, apiPost, apiPostJson, S } from './state.js';
 import { openFile } from './tabs.js';
-import { showToast } from './ui.js';
+import { showToast, copyToClipboard } from './ui.js';
+import { closeSelMenu } from './selbar.js';
+import { on } from './bus.js';
+import { isAutoRevealEnabled } from './settings.js';
 
 export const treeEl = $('#tree');
+const treeMenu = $('#tree-menu');
+let activeTreeTarget = null;
 export const openDirs = new Set();
 // A newer tree action invalidates responses from older directory requests.
 let expansionVersion = 0;
@@ -43,11 +48,12 @@ export async function drawTree(dir, container, depth, isCurrent) {
     // Ignored by .gitignore: still browsable, dimmed, and absent from search.
     const ig = c.ignored ? ' ignored' : '';
     const note = c.ignored ? ' (ignored by .gitignore, not searched)' : '';
+    const menuBtn = '<button class="tr-menu-btn" title="Actions" aria-label="Actions" tabindex="-1"><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><circle cx="2.5" cy="8" r="1.5"/><circle cx="8" cy="8" r="1.5"/><circle cx="13.5" cy="8" r="1.5"/></svg></button>';
     if (c.dir) {
       const dc = c.dirty ? ' dirty' : ''; // backend marks any ancestor of a change
       const ydc = c.yourDirty ? ' your-dirty' : '';
       return '<div class="tw"><div class="tr dir' + ig + dc + ydc + '" data-dir="' + esc(c.path) + '" style="padding-left:' + pad + 'px" title="Folder: ' + esc(c.path) + note + '">' +
-        '<span class="ar"></span><span class="nm">' + esc(c.name) + '</span></div>' +
+        '<span class="ar"></span><span class="nm">' + esc(c.name) + '</span>' + menuBtn + '</div>' +
         '<div class="kids" data-kids="' + esc(c.path) + '"></div></div>';
     }
     const g = GIT_STATUS[c.status];
@@ -59,7 +65,7 @@ export async function drawTree(dir, container, depth, isCurrent) {
     const showTick = S.meta?.pr ? isYou : !!g;
     const tick = showTick ? '<button class="stage-tick' + (c.staged ? ' staged' : '') + '" data-stage="' + esc(c.path) + '" title="' + (c.staged ? 'Unstage' : 'Stage') + '"></button>' : '';
     return '<div class="tr file' + ig + gc + yc + '" data-file="' + esc(c.path) + '" style="padding-left:' + (pad + 12) + 'px" title="Open ' + esc(c.path) + note + '">' +
-      '<span class="ic" data-t="' + fileKind(c.name) + '"></span><span class="nm">' + esc(c.name) + '</span>' + badge + tick + '</div>';
+      '<span class="ic" data-t="' + fileKind(c.name) + '"></span><span class="nm">' + esc(c.name) + '</span>' + badge + tick + menuBtn + '</div>';
   }).join('');
   return true;
 }
@@ -223,6 +229,8 @@ export async function revealDir(dir) {
 }
 
 export async function revealFile(path) {
+  if (!path) return;
+  path = path.replace(/^\/+/, '');
   const idx = path.lastIndexOf('/');
   if (idx > 0) await revealDir(path.slice(0, idx));
   const row = treeEl.querySelector('[data-file="' + CSS.escape(path) + '"]');
@@ -261,6 +269,37 @@ export async function expandDirtyDirs(container = treeEl, version = expansionVer
 }
 
 export async function patchTreeGitStatus(statuses = {}, dirtyDirs = {}, staged = {}, yourStatuses = {}, yourDirtyDirs = {}) {
+  // Check if any changed files belong to an open directory (or root) but don't have a DOM element yet,
+  // or if any previously deleted files are now clean (so they should disappear from the tree).
+  let needRefresh = false;
+  for (const [p, code] of Object.entries(statuses)) {
+    const fileRow = treeEl.querySelector('[data-file="' + CSS.escape(p) + '"]');
+    if (!fileRow) {
+      const lastSlash = p.lastIndexOf('/');
+      const parentDir = lastSlash >= 0 ? p.slice(0, lastSlash) : '';
+      if (parentDir === '' || openDirs.has(parentDir)) {
+        needRefresh = true;
+        break;
+      }
+    }
+  }
+
+  if (!needRefresh) {
+    const dirtyFiles = treeEl.querySelectorAll('.tr.file.dirty');
+    for (const fileRow of dirtyFiles) {
+      const p = fileRow.dataset.file;
+      if (!statuses[p] && fileRow.classList.contains('git-D')) {
+        needRefresh = true;
+        break;
+      }
+    }
+  }
+
+  if (needRefresh) {
+    await refreshTree();
+    return;
+  }
+
   // 1. Update folder dirty and your-dirty classes
   const dirRows = treeEl.querySelectorAll('.tr.dir');
   for (const dirRow of dirRows) {
@@ -340,6 +379,8 @@ export async function patchTreeGitStatus(statuses = {}, dirtyDirs = {}, staged =
       const tick = fileRow.querySelector('.stage-tick');
       if (tick) tick.remove();
     }
+    const menuBtn = fileRow.querySelector('.tr-menu-btn');
+    if (menuBtn) fileRow.appendChild(menuBtn);
   }
 
   // Clean up any remaining .your-change on files no longer in yourStatuses
@@ -404,8 +445,78 @@ export async function setSidebarMode(mode) {
   }
 }
 
+export function closeTreeMenu() {
+  activeTreeTarget = null;
+  if (treeMenu && !treeMenu.hidden) treeMenu.hidden = true;
+}
+
+export function openTreeMenu(row, x, y) {
+  closeTreeMenu();
+  closeSelMenu();
+
+  const isDir = row.classList.contains('dir') || row.dataset.dir !== undefined;
+  const path = row.dataset.dir || row.dataset.file || '';
+  if (!path) return;
+  const name = path.split('/').pop() || path;
+  activeTreeTarget = { path, isDir, name, row };
+
+  if (!treeMenu) return;
+  treeMenu.replaceChildren();
+
+  const items = [
+    { action: 'copy-relative', label: 'Copy Relative Path' },
+    { action: 'copy-name', label: isDir ? 'Copy Folder Name' : 'Copy File Name' },
+    { action: 'copy-absolute', label: 'Copy Absolute Path' },
+  ];
+
+  for (const item of items) {
+    const btn = document.createElement('button');
+    btn.className = 'sel-menu-item';
+    btn.dataset.action = item.action;
+    btn.setAttribute('role', 'menuitem');
+    const label = document.createElement('span');
+    label.textContent = item.label;
+    btn.append(label);
+    treeMenu.append(btn);
+  }
+
+  treeMenu.hidden = false;
+  const w = treeMenu.offsetWidth, h = treeMenu.offsetHeight;
+  treeMenu.style.left = Math.max(4, x + w > innerWidth - 4 ? x - w : x) + 'px';
+  treeMenu.style.top = Math.max(4, y + h > innerHeight - 4 ? y - h : y) + 'px';
+}
+
 export function initTree() {
   updateSidebarToggleState();
+
+  if (treeMenu) {
+    treeMenu.addEventListener('mousedown', e => e.preventDefault());
+    treeMenu.addEventListener('click', e => {
+      const btn = e.target.closest('[data-action]');
+      if (!btn || !activeTreeTarget) return;
+      const { path, name } = activeTreeTarget;
+      const act = btn.dataset.action;
+      closeTreeMenu();
+
+      if (act === 'copy-relative') {
+        copyToClipboard(path, 'Copied ' + path);
+      } else if (act === 'copy-name') {
+        copyToClipboard(name, 'Copied ' + name);
+      } else if (act === 'copy-absolute') {
+        const root = S.meta?.root ? S.meta.root.replace(/\/+$/, '') : '';
+        const fullPath = root ? (path.startsWith('/') ? path : root + '/' + path) : path;
+        copyToClipboard(fullPath, 'Copied ' + fullPath);
+      }
+    });
+
+    document.addEventListener('mousedown', e => {
+      if (!treeMenu.hidden && !treeMenu.contains(e.target)) closeTreeMenu();
+    }, true);
+    addEventListener('keydown', e => { if (e.key === 'Escape') closeTreeMenu(); });
+    addEventListener('resize', closeTreeMenu);
+    addEventListener('blur', closeTreeMenu);
+    document.addEventListener('scroll', closeTreeMenu, true);
+  }
 
   $('#btn-collapse-tree')?.addEventListener('click', () => {
     if (treeEl.classList.contains('changed-only')) return;
@@ -426,7 +537,26 @@ export function initTree() {
     await setSidebarMode('files');
   });
 
+  treeEl.addEventListener('contextmenu', e => {
+    const row = e.target.closest('[data-file], [data-dir]');
+    if (!row) return;
+    e.preventDefault();
+    e.stopPropagation();
+    openTreeMenu(row, e.clientX, e.clientY);
+  });
+
   treeEl.addEventListener('click', async e => {
+    const menuBtn = e.target.closest('.tr-menu-btn');
+    if (menuBtn) {
+      e.stopPropagation();
+      e.preventDefault();
+      const row = menuBtn.closest('[data-file], [data-dir]');
+      if (row) {
+        const at = menuBtn.getBoundingClientRect();
+        openTreeMenu(row, at.right + 2, at.top);
+      }
+      return;
+    }
     const tick = e.target.closest('.stage-tick');
     if (tick) {
       e.stopPropagation();
@@ -472,5 +602,11 @@ export function initTree() {
       f.classList.add('sel');
       openFile(f.dataset.file);
     }
+  });
+
+  on('tab:activated', ({ doc }) => {
+    if (!doc || !doc.path || !isAutoRevealEnabled()) return;
+    if (document.body.classList.contains('side-hidden')) return;
+    revealFile(doc.path);
   });
 }

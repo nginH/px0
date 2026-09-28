@@ -18,7 +18,8 @@ import { initTheme } from './theme.js';
 import { initMarkdown } from './markdown.js';
 import { initDiff } from './diff.js';
 import { initAgent, applyAgentMeta, loadAgentAsync } from './agent.js';
-import { initMetrics, initStatusFit, updateMetricsDisplay, updateStatus } from './status.js';
+import { initThreads } from './thread.js';
+import { initMetrics, initLspMenu, refreshLspMenu, initStatusFit, updateMetricsDisplay, updateStatus } from './status.js';
 import { initSettings } from './settings.js';
 import { initVim } from './vim.js';
 import { initImageViewer } from './imageview.js';
@@ -26,6 +27,7 @@ import { initGitStream } from './gitstream.js';
 import { initGitPanel } from './gitpanel.js';
 import { initPR } from './pr.js';
 import { initLineComment } from './linecomment.js';
+import { initProblems } from './problems.js';
 
 // Initialize all subsystems
 initRenderer();
@@ -46,12 +48,15 @@ initShortcuts();
 initMarkdown();
 initDiff();
 initAgent();
+initThreads();
 initMetrics();
+initLspMenu();
 initStatusFit();
 initSettings();
 initVim();
 initImageViewer();
 initLineComment();
+initProblems();
 
 // Bootstrap application lifecycle
 (async function boot() {
@@ -70,6 +75,8 @@ initLineComment();
     // Restore Markdown preview (default ON)
     const mdPref = localStorage.getItem('px0.mdPreview');
     S.mdPreview = mdPref !== null ? mdPref === 'true' : true;
+    const tablePref = localStorage.getItem('px0.tablePreview');
+    S.tablePreview = tablePref !== null ? tablePref === 'true' : true;
 
     updateEditorOptionControls();
   } catch {}
@@ -79,6 +86,7 @@ initLineComment();
   measure();
   S.meta = await api('/api/meta');
   if (S.meta.metrics) updateMetricsDisplay(S.meta.metrics);
+  refreshLspMenu();
   updateSidebarToggleState();
   applyAgentMeta();
   initPR();
