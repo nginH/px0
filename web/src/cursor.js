@@ -254,8 +254,9 @@ export function initCursor() {
       e.preventDefault();
       S.at = w; S.lastWord = w.word;
       pushHistory(d.path, d.cur); // so Alt+Left returns to the call site
-      const targetView = e.altKey ? 'diff' : 'source';
-      gotoDefinition(w, { view: targetView });
+      // Plain click keeps the current mode; Alt flips it.
+      const inDiff = !!d.diffMode;
+      gotoDefinition(w, { view: (e.altKey ? !inDiff : inDiff) ? 'diff' : 'source' });
       return;
     }
     for (const r of rowsEl.children) r.classList.toggle('cur', +r.dataset.l === d.cur);

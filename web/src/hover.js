@@ -7,32 +7,22 @@ import { wordAtPoint } from './cursor.js';
 import { gotoDefinition, findReferences } from './lsp.js';
 import { showCalls } from './calls.js';
 import { diffview } from './diff.js';
+import { makeCardKeeper, pointerPos } from './cardkeep.js';
 
 export const hovercard = $('#hovercard');
 export const HOVER_DELAY = 380;   // rest time before the card opens
-export const HOVER_KEEP = 26;     // px the pointer may drift before the card closes
+// How far the pointer may have drifted while the hover request was in flight
+// before the answer is stale enough to drop rather than show somewhere else.
+const HOVER_DRIFT = 220;
 
 let hoverTimer = 0, hoverSeq = 0, moveRAF = 0, pendingMove = null, pointerAt = null;
-let hideTimer = 0;
+
+/* The card's lifetime belongs to the keeper, which watches the pointer across
+   the whole document -- not to a mouseleave on whatever the card happens to
+   overlap. See cardkeep.js for why that distinction is the whole fix. */
+const hoverKeeper = makeCardKeeper(hovercard, { hide: hideHover });
 
 const sameWord = (a, b) => !!a && !!b && a.line === b.line && a.col === b.col && a.word === b.word;
-
-function isInsideCard(x, y, padding = 16) {
-  if (!hovercard || hovercard.hidden || x == null || y == null) return false;
-  const r = hovercard.getBoundingClientRect();
-  return x >= r.left - padding && x <= r.right + padding &&
-         y >= r.top - padding && y <= r.bottom + padding;
-}
-
-function isInCorridor(x, y, buffer = 48) {
-  if (!S.hoverAnchor || !hovercard || hovercard.hidden || x == null || y == null) return false;
-  const r = hovercard.getBoundingClientRect();
-  const minX = Math.min(S.hoverAnchor.x, r.left) - buffer;
-  const maxX = Math.max(S.hoverAnchor.x, r.right) + buffer;
-  const minY = Math.min(S.hoverAnchor.y, r.top) - buffer;
-  const maxY = Math.max(S.hoverAnchor.y, r.bottom) + buffer;
-  return x >= minX && x <= maxX && y >= minY && y <= maxY;
-}
 
 /* Hit-testing a point costs a few milliseconds: it forces layout and walks the
    line's nodes. Far too much to spend on every animation frame, so it runs only
@@ -48,7 +38,6 @@ export function onMove({ x, y, mod }) {
       paint();
     }
     clearTimeout(hoverTimer);
-    clearTimeout(hideTimer);
     hideHover();
     return;
   }
@@ -60,20 +49,9 @@ export function onMove({ x, y, mod }) {
     paint();
   }
 
-  // When hovercard is visible, keep it alive if moving towards or inside it
-  if (S.hoverAnchor && !hovercard.hidden) {
-    if (isInsideCard(x, y) || isInCorridor(x, y)) {
-      clearTimeout(hideTimer);
-      hideTimer = 0;
-      clearTimeout(hoverTimer);
-      return; // actively over the card or navigating towards it
-    }
-    // Pointer has left both the card and the navigation corridor
-    if (!hideTimer) {
-      hideTimer = setTimeout(hideHover, 280);
-    }
-    return;
-  }
+  // An open card is the keeper's business; moving under it must not re-arm a
+  // second request for the word the card is already describing.
+  if (!hovercard.hidden) { clearTimeout(hoverTimer); return; }
 
   if (S.settings && (S.settings['lsp.hover.enabled'] === false || S.settings['lsp.enabled'] === false)) return;
   if (S.lsp.state !== 'ready' && S.lsp.state !== 'indexing') return;
@@ -97,10 +75,16 @@ export async function showHover(at, x, y) {
   setLspState(j);
   if (!j || j.empty || (!j.signature && !j.doc)) return;
 
-  clearTimeout(hideTimer);
-  hideTimer = 0;
+  /* The request can take seconds. Open the card where the pointer is *now*,
+     not where it rested when the request went out -- an anchor that far behind
+     puts the card outside its own corridor and closes it on the next move. If
+     the pointer has gone somewhere else entirely, drop the answer instead. */
+  const live = pointerPos();
+  if (live && Math.hypot(live.x - x, live.y - y) > HOVER_DRIFT) return;
+  const ax = live ? live.x : x, ay = live ? live.y : y;
+
   S.hover = at;
-  S.hoverAnchor = { x, y };
+  S.hoverAnchor = { x: ax, y: ay };
   const refPath = d.path + ':' + at.line;
   hovercard.innerHTML =
     (j.signature ? '<div class="sig">' + j.signature + '</div>' : '') +
@@ -160,7 +144,8 @@ export async function showHover(at, x, y) {
   };
 
   hovercard.hidden = false;
-  placeHover(x, y);
+  placeHover(ax, ay);
+  hoverKeeper.open({ x: ax, y: ay });
 }
 
 /* Anchor below the pointer, flipping above or inward when that would overflow
@@ -180,8 +165,7 @@ export function placeHover(x, y) {
 }
 
 export function hideHover() {
-  clearTimeout(hideTimer);
-  hideTimer = 0;
+  hoverKeeper.close();
   hoverSeq++;
   S.hover = null;
   S.hoverAnchor = null;
@@ -190,8 +174,6 @@ export function hideHover() {
 
 export function clearLink() {
   clearTimeout(hoverTimer);
-  clearTimeout(hideTimer);
-  hideTimer = 0;
   hideHover();
   if (S.link) {
     S.link = null;
@@ -202,19 +184,6 @@ export function clearLink() {
 }
 
 export function initHover() {
-  hovercard.addEventListener('mouseenter', () => {
-    clearTimeout(hideTimer);
-    hideTimer = 0;
-  });
-  hovercard.addEventListener('mousemove', () => {
-    clearTimeout(hideTimer);
-    hideTimer = 0;
-  });
-  hovercard.addEventListener('mouseleave', () => {
-    clearTimeout(hideTimer);
-    hideTimer = setTimeout(hideHover, 280);
-  });
-
   const attachPointer = (el) => {
     if (!el) return;
     el.addEventListener('mousemove', e => {
@@ -228,19 +197,12 @@ export function initHover() {
         if (m) onMove(m);
       });
     });
-    el.addEventListener('mouseleave', (e) => {
+    /* Leaving the code only cancels a card that hasn't opened yet. One that
+       has is the keeper's, which is still watching the pointer out here. */
+    el.addEventListener('mouseleave', () => {
       pointerAt = null;
-      if (e.relatedTarget && (hovercard === e.relatedTarget || hovercard.contains(e.relatedTarget))) {
-        return;
-      }
-      if (isInsideCard(e.clientX, e.clientY)) {
-        return;
-      }
-      if (!hovercard.hidden) {
-        if (!hideTimer) hideTimer = setTimeout(hideHover, 280);
-      } else {
-        clearLink();
-      }
+      clearTimeout(hoverTimer);
+      if (hovercard.hidden) clearLink();
     });
     el.addEventListener('scroll', () => { clearTimeout(hoverTimer); hideHover(); }, { passive: true });
     el.addEventListener('mousedown', (e) => {
@@ -248,8 +210,7 @@ export function initHover() {
       hideHover();
     });
     el.addEventListener('dblclick', e => {
-      clearTimeout(hideTimer);
-      hideTimer = 0;
+      hoverKeeper.cancel();
       hoverAt(e.clientX, e.clientY);
     });
   };

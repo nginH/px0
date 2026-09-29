@@ -135,6 +135,7 @@ export const LH = 20, CHUNK = 1000, OVERSCAN = 24;
  * @property {boolean} [prCollapsed]
  * @property {boolean} [youCollapsed]
  * @property {{line: number, col: number}|null} [selAnchor]
+ * @property {string} [diffRef] - commit SHA the tab is diffing, '' for the working tree
  * @property {string} [diffText]
  * @property {any} [diffHunks]
  * @property {number} [mdLine]
@@ -186,6 +187,7 @@ export const LH = 20, CHUNK = 1000, OVERSCAN = 24;
  * @property {boolean} tablePreview
  * @property {any} settings
  * @property {Array<{id: string, path: string, l1: number, l2: number}>} agentTargets
+ * @property {number} unpushedCount
  */
 
 /** @type {AppState} */
@@ -211,6 +213,7 @@ export const S = {
   tablePreview: true, // CSV and TSV tabs open as a table (default ON)
   settings: null,    // loaded from /api/settings
   agentTargets: [],  // [{ id, path, l1, l2 }, ...] ranges of open compose/edit sessions
+  unpushedCount: 0,  // commits ahead of the tracking branch; owned by unpushed.js
 };
 
 /** @returns {DocTab|null} */

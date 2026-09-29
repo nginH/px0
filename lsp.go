@@ -68,27 +68,6 @@ var lspSymbolKind = map[int]string{
 	26: "type",
 }
 
-type lspDiagnostic struct {
-	Range              lspRange         `json:"range"`
-	Severity           int              `json:"severity,omitempty"` // 1: Error, 2: Warning, 3: Info, 4: Hint
-	Code               any              `json:"code,omitempty"`
-	Source             string           `json:"source,omitempty"`
-	Message            string           `json:"message"`
-	Tags               []int            `json:"tags,omitempty"`
-	RelatedInformation []lspRelatedInfo `json:"relatedInformation,omitempty"`
-}
-
-type lspRelatedInfo struct {
-	Location lspLocation `json:"location"`
-	Message  string      `json:"message"`
-}
-
-type lspPublishDiagnosticsParams struct {
-	URI         string          `json:"uri"`
-	Version     *int            `json:"version,omitempty"`
-	Diagnostics []lspDiagnostic `json:"diagnostics"`
-}
-
 type rpcMessage struct {
 	JSONRPC string          `json:"jsonrpc"`
 	ID      json.RawMessage `json:"id,omitempty"`
@@ -133,10 +112,6 @@ type lspClient struct {
 	// "the server has not finished indexing yet".
 	indexMu  sync.Mutex
 	indexing int
-
-	diagMu      sync.RWMutex
-	diagnostics map[string][]lspDiagnostic
-	diagChs     map[string][]chan struct{}
 }
 
 func newLSPClient(def lspServerDef, root string) *lspClient {
@@ -147,8 +122,6 @@ func newLSPClient(def lspServerDef, root string) *lspClient {
 		encoding:    "utf-16",
 		readyCh:     make(chan struct{}),
 		logf:        func(string, ...any) {},
-		diagnostics: map[string][]lspDiagnostic{},
-		diagChs:     map[string][]chan struct{}{},
 	}
 }
 
@@ -265,64 +238,7 @@ func (c *lspClient) onNotification(msg rpcMessage) {
 			}
 		}
 		c.indexMu.Unlock()
-
-	case "textDocument/publishDiagnostics":
-		var p lspPublishDiagnosticsParams
-		if err := json.Unmarshal(msg.Params, &p); err == nil {
-			c.diagMu.Lock()
-			if p.Diagnostics == nil {
-				p.Diagnostics = []lspDiagnostic{}
-			}
-			c.diagnostics[p.URI] = p.Diagnostics
-			if chs, ok := c.diagChs[p.URI]; ok {
-				for _, ch := range chs {
-					select {
-					case ch <- struct{}{}:
-					default:
-					}
-				}
-				delete(c.diagChs, p.URI)
-			}
-			c.diagMu.Unlock()
-		}
 	}
-}
-
-func (c *lspClient) getDiagnostics(uri string) ([]lspDiagnostic, bool) {
-	c.diagMu.RLock()
-	defer c.diagMu.RUnlock()
-	d, ok := c.diagnostics[uri]
-	if !ok {
-		return nil, false
-	}
-	out := make([]lspDiagnostic, len(d))
-	copy(out, d)
-	return out, true
-}
-
-func (c *lspClient) waitDiagnostics(ctx context.Context, uri string) []lspDiagnostic {
-	c.diagMu.Lock()
-	if d, ok := c.diagnostics[uri]; ok {
-		c.diagMu.Unlock()
-		out := make([]lspDiagnostic, len(d))
-		copy(out, d)
-		return out
-	}
-	ch := make(chan struct{}, 1)
-	c.diagChs[uri] = append(c.diagChs[uri], ch)
-	c.diagMu.Unlock()
-
-	select {
-	case <-ctx.Done():
-	case <-ch:
-	}
-
-	c.diagMu.RLock()
-	defer c.diagMu.RUnlock()
-	d := c.diagnostics[uri]
-	out := make([]lspDiagnostic, len(d))
-	copy(out, d)
-	return out
 }
 
 func (c *lspClient) busy() bool {
@@ -453,10 +369,6 @@ func (c *lspClient) initialize(ctx context.Context) error {
 			},
 			"textDocument": map[string]any{
 				"synchronization": map[string]any{"didSave": true, "dynamicRegistration": false},
-				"publishDiagnostics": map[string]any{
-					"relatedInformation": true,
-					"versionSupport":    true,
-				},
 				"definition":      map[string]any{"linkSupport": true},
 				"typeDefinition":  map[string]any{"linkSupport": true},
 				"implementation":  map[string]any{"linkSupport": true},
@@ -587,10 +499,6 @@ func (c *lspClient) closeDoc(abs string) {
 	}
 	delete(c.opened, uri)
 	c.mu.Unlock()
-
-	c.diagMu.Lock()
-	delete(c.diagnostics, uri)
-	c.diagMu.Unlock()
 
 	c.notify("textDocument/didClose", map[string]any{
 		"textDocument": map[string]any{

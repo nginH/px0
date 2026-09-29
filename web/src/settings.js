@@ -3,6 +3,7 @@ import { $, $$, esc, S, api, apiPost, apiPostJson } from './state.js';
 import { showToast } from './ui.js';
 import { applyEditorTypography, toggleWordWrap, toggleLineNumbers } from './renderer.js';
 import { setTheme, listThemes } from './theme.js';
+import { chooseThemePreference, DEFAULT_THEME } from './theme-preference.js';
 import { setLayoutPref } from './diff.js';
 import { setVimModeEnabled, showVimHelp } from './vim.js';
 
@@ -413,7 +414,9 @@ export function applySettingLive(key, val) {
       break;
     }
     case 'workbench.colorTheme': {
-      if (val) setTheme(val, true);
+      const storedTheme = localStorage.getItem('px0.theme');
+      const nextTheme = chooseThemePreference(storedTheme, val, DEFAULT_THEME);
+      if (nextTheme) setTheme(nextTheme, false);
       break;
     }
     case 'diffEditor.renderSideBySide': {

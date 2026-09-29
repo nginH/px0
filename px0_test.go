@@ -581,32 +581,6 @@ func TestCloseEndpoint(t *testing.T) {
 	}
 }
 
-func TestLSPProblemsEndpoint(t *testing.T) {
-	s, _ := newTestServer(t)
-
-	// Bad path returns 400
-	code, _ := get(t, s, "/api/lsp/problems?path=../../nonexistent")
-	if code != http.StatusBadRequest {
-		t.Errorf("expected 400 for bad path, got %d", code)
-	}
-
-	// Valid path
-	code, body := get(t, s, "/api/lsp/problems?path=greet.go")
-	if code != http.StatusOK {
-		t.Fatalf("expected 200, got %d %v", code, body)
-	}
-	if body["path"] != "greet.go" {
-		t.Errorf("expected path greet.go, got %v", body["path"])
-	}
-	counts, ok := body["counts"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected counts map, got %v", body["counts"])
-	}
-	if counts["total"] == nil || counts["error"] == nil || counts["warning"] == nil {
-		t.Errorf("missing count fields: %v", counts)
-	}
-}
-
 func TestListenPortFallback(t *testing.T) {
 	// Bind a port first
 	ln1, addr1, err := listen("127.0.0.1", 0)

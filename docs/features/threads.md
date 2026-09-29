@@ -35,6 +35,16 @@ There is no overlap guard. Threads and inline edits can run at the same time, on
 
 [Inline edit](agent-editing.md) comment boxes live at the top of this same pane (the tab shows how many are waiting to be applied), so composing, applying and following up all happen in one place. An inline edit or batch you apply is recorded as a thread, labelled `inline` or `batch` in the list. Open it to read the agent's summary and the files it changed, or send a follow-up such as "also update the tests". These threads keep the overlap check inline edits have always had: an edit on lines another edit is still changing is refused. A conversation you start yourself is never blocked this way.
 
+## Threads in a PR Review
+
+In a [PR review](github-pr-review.md) a thread has a scope, picked with the **About** chips above the message box:
+
+- **Whole PR**: the entire pull request, merge-base to PR head. This is what "the PR" means, not the latest commit.
+- **My changes**: only what you have done on top of the PR, uncommitted and unpushed.
+- **Selection**: just the code the thread is anchored to.
+
+The default comes from where you started: the editor section a selection was made in (PR changes or Your changes), then the sidebar's **PR changes / Yours** switch, otherwise the whole PR. You can change it at any time; the assistant is told on the next message. The assistant is given the exact git range for the scope and the diff saved as a file, so it reads the whole change instead of guessing.
+
 ## The Thread List
 
 The list shows every thread for the workspace, most recently active first, with its anchor, turn count and age. A spinner marks a thread that is working, and `!` marks one whose last reply failed. **This file** filters to threads started in the open file. The **Threads** tab shows a pulsing dot while any thread is working, so you can leave it and come back.

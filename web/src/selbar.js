@@ -156,6 +156,16 @@ export function getSelectedRangeInfo() {
   return extractEditorSelection(range, d);
 }
 
+/* The part of a code cell the selection actually covers: the whole cell for
+   rows in the middle, a clipped slice for the first and last. */
+function clipToRange(el, range) {
+  const r = document.createRange();
+  r.selectNodeContents(el);
+  if (range.compareBoundaryPoints(Range.START_TO_START, r) > 0) r.setStart(range.startContainer, range.startOffset);
+  if (range.compareBoundaryPoints(Range.END_TO_END, r) < 0) r.setEnd(range.endContainer, range.endOffset);
+  return r.toString();
+}
+
 /* A diff selection is anchored to the working-tree lines stamped on its rows,
    on either side of a split. A selection of deleted lines alone has nothing on
    disk, so it is anchored to the lines either side of where they were. The text
@@ -186,7 +196,7 @@ function diffSelection(range, d) {
       if (n < old1) old1 = n;
       if (n > old2) old2 = n;
     }
-    parts.push(code ? code.textContent : '');
+    parts.push(code ? clipToRange(code, range) : '');
   }
   if (!parts.length) return null;
   const isDeletedOnly = (l1 === Infinity);

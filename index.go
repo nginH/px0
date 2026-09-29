@@ -58,6 +58,8 @@ type Index struct {
 	gitYourStatusMap map[string]string
 	diffBase         string
 	prHead           string
+	prFiles          map[string]string
+	pushedHead       string // PR mode: remote branch tip as of the last push; bounds "unpushed"
 	readyCh          chan struct{}
 }
 
@@ -86,8 +88,43 @@ func (ix *Index) DiffBase() string {
 // SetPRHead stores the checked-out PR head commit SHA in PR review mode.
 func (ix *Index) SetPRHead(head string) {
 	ix.mu.Lock()
-	ix.prHead = head
+	base := ix.diffBase
 	ix.mu.Unlock()
+	// The PR's own file set only moves with the head or the base, so it is
+	// worked out here once rather than on every git-status tick.
+	files := gitFilesBetween(ix.root, base, head)
+	ix.mu.Lock()
+	ix.prHead = head
+	ix.prFiles = files
+	ix.mu.Unlock()
+}
+
+// PRFiles returns the paths the PR itself changes (diffBase..PR head) with
+// their git status letters, as opposed to files only the reviewer has touched.
+// Empty outside PR review.
+func (ix *Index) PRFiles() map[string]string {
+	ix.mu.RLock()
+	defer ix.mu.RUnlock()
+	out := make(map[string]string, len(ix.prFiles))
+	for k, v := range ix.prFiles {
+		out[k] = v
+	}
+	return out
+}
+
+// SetPushedHead records the PR branch's tip after a push (or pull), which is
+// the boundary "ahead"/"unpushed" are counted from. Unlike prHead it moves on push.
+func (ix *Index) SetPushedHead(head string) {
+	ix.mu.Lock()
+	ix.pushedHead = head
+	ix.mu.Unlock()
+}
+
+// PushedHead returns the unpushed boundary, or empty outside PR review mode.
+func (ix *Index) PushedHead() string {
+	ix.mu.RLock()
+	defer ix.mu.RUnlock()
+	return ix.pushedHead
 }
 
 // PRHead returns the checked-out PR head commit SHA, or empty if not in PR review mode.

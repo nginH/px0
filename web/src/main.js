@@ -5,11 +5,11 @@ import { initTabs, openFile, restoreWorkspaceTabs, switchTab } from './tabs.js';
 import { initCursor } from './cursor.js';
 import { initHover } from './hover.js';
 import { initSelectionBar } from './selbar.js';
-import { drawTree, treeEl, initTree, revealFile, refreshTree, restoreOpenDirs, setSidebarMode, updateSidebarToggleState } from './tree.js';
+import { drawTree, treeEl, initTree, revealFile, refreshTree, restoreOpenDirs, setSidebarMode, updateSidebarToggleState, hasGitView } from './tree.js';
 import { initSearch } from './search.js';
 import { initOutline } from './outline.js';
 import { initPanels } from './panels.js';
-import { initInspector } from './inspector.js';
+import { initInspector, showRightInspector } from './inspector.js';
 import { initCalls } from './calls.js';
 import { initFind } from './find.js';
 import { initPalette } from './palette.js';
@@ -27,7 +27,8 @@ import { initGitStream } from './gitstream.js';
 import { initGitPanel } from './gitpanel.js';
 import { initPR } from './pr.js';
 import { initLineComment } from './linecomment.js';
-import { initProblems } from './problems.js';
+import { initUnpushed, refreshUnpushed } from './unpushed.js';
+import { initPRScope } from './prscope.js';
 
 // Initialize all subsystems
 initRenderer();
@@ -56,7 +57,8 @@ initSettings();
 initVim();
 initImageViewer();
 initLineComment();
-initProblems();
+initUnpushed();
+initPRScope();
 
 // Bootstrap application lifecycle
 (async function boot() {
@@ -90,13 +92,20 @@ initProblems();
   updateSidebarToggleState();
   applyAgentMeta();
   initPR();
+  showRightInspector(); // the right sidebar starts open, on Threads when there is a harness
   document.title = S.meta.name + ' - px0';
   $('#root-name').textContent = S.meta.name;
   $('#root-name').title = S.meta.root;
   if (S.meta.version) {
     const emptyVerEl = $('#empty-ver');
     if (emptyVerEl) emptyVerEl.textContent = 'v' + S.meta.version;
+    const stVerEl = $('#st-ver');
+    if (stVerEl) {
+      stVerEl.textContent = 'v' + S.meta.version;
+      stVerEl.title = `px0 v${S.meta.version} (Click for shortcuts & help)`;
+    }
   }
+  updateStatus();
   try {
     const session = await api('/api/session');
     if (session && Array.isArray(session.openDirs) && session.openDirs.length > 0) {
@@ -112,13 +121,12 @@ initProblems();
   // completes (common right after `px0 <pr-url>`) would otherwise never
   // auto-select a diff tab -- until the next manual reload.
   const applyGitSidebarState = async () => {
-    const hasGitChanges = !!(S.meta?.git && S.meta.gitChanges > 0);
-    if (hasGitChanges) {
-      await setSidebarMode('git');
-    } else {
-      await setSidebarMode('files');
-    }
-    return hasGitChanges;
+    // The unpushed list decides this too: a clean tree with local commits
+    // still belongs in Git view, which is the only place they are listed.
+    await refreshUnpushed();
+    const showGit = hasGitView();
+    await setSidebarMode(showGit ? 'git' : 'files');
+    return !!(S.meta?.git && S.meta.gitChanges > 0);
   };
   const selectChangedFileTab = async () => {
     if (S.tabs[S.active]?.diffAvailable) return;

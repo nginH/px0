@@ -1,9 +1,10 @@
 // web/src/tree.js
 import { $, $$, esc, api, apiPost, apiPostJson, S } from './state.js';
 import { openFile } from './tabs.js';
+import { syncDiffView, focusDiffScope } from './diff.js';
 import { showToast, copyToClipboard } from './ui.js';
 import { closeSelMenu } from './selbar.js';
-import { on } from './bus.js';
+import { emit, on } from './bus.js';
 import { isAutoRevealEnabled } from './settings.js';
 
 export const treeEl = $('#tree');
@@ -59,15 +60,48 @@ export async function drawTree(dir, container, depth, isCurrent) {
     const g = GIT_STATUS[c.status];
     const gc = g ? ' dirty ' + g[0] : '';
     const isYou = !!c.yourStatus;
-    const yc = isYou ? ' your-change' : '';
+    const yc = (isYou ? ' your-change' : '') + (prFileMap()?.[c.path] ? ' pr-file' : '');
     const youBadge = isYou ? '<span class="gs-you-tag" title="Modified by you in this review session">YOU</span>' : '';
     const badge = g ? '<span class="gs' + (isYou ? ' gs-you' : '') + '" title="' + (isYou ? 'Your change (' + c.yourStatus + '), git: ' + g[1] : 'git: ' + g[1]) + '">' + esc(c.status) + '</span>' + youBadge : '';
     const showTick = S.meta?.pr ? isYou : !!g;
     const tick = showTick ? '<button class="stage-tick' + (c.staged ? ' staged' : '') + '" data-stage="' + esc(c.path) + '" title="' + (c.staged ? 'Unstage' : 'Stage') + '"></button>' : '';
-    return '<div class="tr file' + ig + gc + yc + '" data-file="' + esc(c.path) + '" style="padding-left:' + (pad + 12) + 'px" title="Open ' + esc(c.path) + note + '">' +
+    return '<div class="tr file' + ig + gc + yc + '" data-file="' + esc(c.path) + '"' + (c.status ? ' data-st="' + esc(c.status) + '"' : '') + (c.yourStatus ? ' data-yst="' + esc(c.yourStatus) + '"' : '') + ' style="padding-left:' + (pad + 12) + 'px" title="Open ' + esc(c.path) + note + '">' +
       '<span class="ic" data-t="' + fileKind(c.name) + '"></span><span class="nm">' + esc(c.name) + '</span>' + badge + tick + menuBtn + '</div>';
   }).join('');
+  relabelTreeBadges();
   return true;
+}
+
+/* The paths the PR itself changes (server: diffBase..PR head), as a Set. Rows in
+   the sidebar's "PR changes" scope are limited to these; a file only you have
+   touched belongs to "Yours". Null outside PR review. */
+const prFileMap = () => S.meta?.pr?.files || null;
+
+/* The badge letter follows the sidebar scope. "PR changes" keeps the letter the
+   PR itself gave the file (A, M, D...) however you have edited it since; "Yours"
+   shows your change measured from the PR head; otherwise git's combined status.
+   Rows remember both letters (data-st / data-yst) so a scope switch can relabel
+   them without another fetch. */
+function scopedCode(path, st, yst) {
+  if (treeEl.classList.contains('scope-pr')) return prFileMap()?.[path] || st;
+  if (treeEl.classList.contains('scope-yours')) return yst || st;
+  return st;
+}
+
+export function relabelTreeBadges() {
+  for (const row of treeEl.querySelectorAll('.tr.file[data-st]')) {
+    const badge = row.querySelector('.gs');
+    if (!badge) continue;
+    const code = scopedCode(row.dataset.file, row.dataset.st, row.dataset.yst);
+    const g = GIT_STATUS[code];
+    if (!g) continue;
+    row.classList.remove('git-M', 'git-A', 'git-D', 'git-untracked', 'git-R');
+    row.classList.add(g[0]);
+    badge.textContent = code;
+    const you = !!row.dataset.yst;
+    badge.title = you && !treeEl.classList.contains('scope-pr')
+      ? 'Your change (' + row.dataset.yst + '), git: ' + g[1] : 'git: ' + g[1];
+  }
 }
 
 /* A colour family per file kind, drawn in CSS. Emoji or icon fonts would be at
@@ -331,6 +365,8 @@ export async function patchTreeGitStatus(statuses = {}, dirtyDirs = {}, staged =
     const isYou = !!yourStatuses[p];
     fileRow.classList.remove('git-M', 'git-A', 'git-D', 'git-untracked', 'git-R');
     fileRow.classList.toggle('your-change', isYou);
+    if (code) fileRow.dataset.st = code; else delete fileRow.dataset.st;
+    if (yourStatuses[p]) fileRow.dataset.yst = yourStatuses[p]; else delete fileRow.dataset.yst;
     if (g) {
       fileRow.classList.add('dirty', g[0]);
       let badge = fileRow.querySelector('.gs');
@@ -397,25 +433,49 @@ export async function patchTreeGitStatus(statuses = {}, dirtyDirs = {}, staged =
     }
   }
 
+  relabelTreeBadges();
+
   // If in changed-only mode, auto-expand any newly dirty directories
+  markTreeCleanState();
   if (treeEl.classList.contains('changed-only')) {
     await expandDirtyDirs();
   }
 }
 
+/* Whether the Git view has anything to show. Unpushed commits count: once you
+   commit, the working tree goes clean but the commits are still unreviewed, and
+   the Unpushed section under the tree (unpushed.js, which owns S.unpushedCount)
+   is exactly where they show up. */
+/* In Git view with a clean working tree the tree renders nothing (every row is
+   filtered out), so it stops claiming the sidebar's spare height and says why.
+   The Unpushed section below it is then the whole of the view. */
+function markTreeCleanState() {
+  treeEl.classList.toggle('no-changes',
+    treeEl.classList.contains('changed-only') && !(S.meta?.gitChanges > 0));
+}
+
+export function hasGitView() {
+  return !!(S.meta?.git && ((S.meta.gitChanges > 0) || (S.unpushedCount > 0)));
+}
+
+export function inGitMode() {
+  return !!treeEl?.classList.contains('changed-only');
+}
+
 export function updateSidebarToggleState() {
   const btnChanged = $('#btn-changed');
-  const hasGitChanges = !!(S.meta?.git && S.meta.gitChanges > 0);
-  if (btnChanged) {
-    btnChanged.disabled = !hasGitChanges;
-    btnChanged.classList.toggle('disabled', !hasGitChanges);
-    if (!S.meta?.git) {
-      btnChanged.title = 'Git not available in workspace';
-    } else if (!hasGitChanges) {
-      btnChanged.title = 'There are no git modified files.';
-    } else {
-      btnChanged.title = 'Git changes (show changed files only)';
-    }
+  if (!btnChanged) return;
+  const available = hasGitView();
+  btnChanged.disabled = !available;
+  btnChanged.classList.toggle('disabled', !available);
+  if (!S.meta?.git) {
+    btnChanged.title = 'Git not available in workspace';
+  } else if (!available) {
+    btnChanged.title = 'There are no git modified files.';
+  } else if (!(S.meta.gitChanges > 0)) {
+    btnChanged.title = 'Git changes (working tree clean — showing unpushed commits)';
+  } else {
+    btnChanged.title = 'Git changes (show changed files only)';
   }
 }
 
@@ -425,9 +485,8 @@ export async function setSidebarMode(mode) {
   const btnCollapse = $('#btn-collapse-tree');
   const btnExpand = $('#btn-expand-tree');
   updateSidebarToggleState();
-  const hasGitChanges = !!(S.meta?.git && S.meta.gitChanges > 0);
 
-  if (mode === 'git' && hasGitChanges) {
+  if (mode === 'git' && hasGitView()) {
     treeEl.classList.add('changed-only');
     btnChanged?.classList.add('active');
     btnFiles?.classList.remove('active');
@@ -443,6 +502,9 @@ export async function setSidebarMode(mode) {
     if (btnCollapse) btnCollapse.hidden = false;
     if (btnExpand) btnExpand.hidden = false;
   }
+  markTreeCleanState();
+  // unpushed.js hangs its section off this; tree.js doesn't import it.
+  emit('sidebar:mode', { mode: treeEl.classList.contains('changed-only') ? 'git' : 'files' });
 }
 
 export function closeTreeMenu() {
@@ -528,8 +590,7 @@ export function initTree() {
   });
 
   $('#btn-changed')?.addEventListener('click', async () => {
-    const hasGitChanges = !!(S.meta?.git && S.meta.gitChanges > 0);
-    if (!hasGitChanges) return;
+    if (!hasGitView()) return;
     await setSidebarMode('git');
   });
 
@@ -600,7 +661,12 @@ export function initTree() {
     if (f) {
       $$('.tr.sel', treeEl).forEach(x => x.classList.remove('sel'));
       f.classList.add('sel');
-      openFile(f.dataset.file);
+      // The scope picks the section: "Yours" opens Your changes with the PR's
+      // folded, "PR changes" the reverse -- also for a tab that is already open
+      // and has been toggled the other way.
+      const t = S.tabs.find(x => x.path === f.dataset.file);
+      if (t) focusDiffScope(t);
+      openFile(f.dataset.file).then(() => { if (t) syncDiffView(); });
     }
   });
 

@@ -77,7 +77,6 @@ export const COMMANDS = [
     else hideRightInspector();
   } },
   { name: 'Show File Symbols (Right Panel)', run: () => showRightInspector('symbols') },
-  { name: withKeys('Show Problems in File ({Mod+Shift+M})'), run: () => showRightInspector('problems') },
   { name: 'Reveal Active File in Explorer', run: () => { const d = doc_(); if (d) { showPanel('files'); revealFile(d.path); } } },
   { name: withKeys('Toggle Word Wrap ({Alt+Z})'), run: () => toggleWordWrap() },
   { name: withKeys('Toggle Markdown / Table Preview ({Alt+M})'), run: () => togglePreview() },

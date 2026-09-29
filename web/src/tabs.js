@@ -13,7 +13,6 @@ import { clearLink } from './hover.js';
 import { clearFind } from './find.js';
 import { clearSelectAll } from './selbar.js';
 import { syncPreview, previewing, previewLine } from './markdown.js';
-import { updateProblemsBadge, renderProblemsPane } from './problems.js';
 import { syncDiffView, layoutPref, diffScrollTop, setDiffMode, setSourceJumpHandler, scrollDiffToLine } from './diff.js';
 import { syncImageView } from './imageview.js';
 
@@ -67,20 +66,38 @@ function openTabMenu(index, x, y) {
   tabMenu.style.top = Math.max(4, Math.min(y, innerHeight - h - 4)) + 'px';
 }
 
+/* opts.ref pins the tab to one commit: every diff it shows is that commit's
+   own change to the file, frozen no matter what happens in the working tree
+   afterwards. The Unpushed sidebar section is what passes it. Opening the same
+   path from anywhere else (tree, search, go-to-definition) passes no ref and so
+   puts the tab back on the working tree, which is what "open this file" means
+   everywhere else in px0. */
 export async function openFile(path, opts = {}) {
-  const { line, push = true, col, view } = opts;
+  const { line, push = true, col, view, soft = false, ref = '' } = opts;
   const prev = doc_();
-  const sourceSelected = prev ? !prev.diffMode : false;
-  const diffSelected = prev ? !!prev.diffMode : false;
   const wantsDiff = view === 'diff';
-  const wantsSource = view === 'source' || (sourceSelected && !wantsDiff);
+  const wantsSource = view === 'source';
 
   let idx = S.tabs.findIndex(t => t.path === path);
+  if (idx >= 0 && (S.tabs[idx].diffRef || '') !== ref) {
+    /* Same tab, different revision. Drop the cached diff and let loadGutter
+       re-decide: the file may have a diff at the commit and none in the
+       working tree, or the other way round, so neither diffAvailable nor
+       diffMode survives the switch. */
+    const t = S.tabs[idx];
+    t.diffRef = ref;
+    t.diffText = undefined;
+    t.diffHunks = undefined;
+    t.diffDismissed = false;
+    t.diffMode = null;
+    t.openedInDiffView = true;
+    await loadGutter(t);
+  }
   if (idx < 0) {
     let j;
     const start = line ? Math.max(0, Math.floor((line - 1) / CHUNK) * CHUNK) : 0;
     try {
-      j = await api('/api/file', { path, start, count: CHUNK });
+      j = await api('/api/file', { path, start, count: CHUNK, ref });
     } catch (e) {
       setStatusNote(path + ': ' + e.message, 4000);
       return;
@@ -97,18 +114,11 @@ export async function openFile(path, opts = {}) {
         initialDiffMode = null;
         initialDismissed = true;
         initialOpenedInDiff = false;
-      } else if (wantsDiff || j.deleted) {
-        initialDiffMode = layoutPref() || 'split';
-        initialDismissed = false;
-        initialOpenedInDiff = true;
-      } else if (treeEl?.classList.contains('changed-only') || diffSelected) {
-        initialDiffMode = layoutPref() || 'split';
-        initialDismissed = false;
-        initialOpenedInDiff = true;
       } else {
-        initialDiffMode = null;
+        // Any file with a diff opens in diff mode unless source was asked for.
+        initialDiffMode = layoutPref() || 'split';
         initialDismissed = false;
-        initialOpenedInDiff = false;
+        initialOpenedInDiff = true;
       }
     }
 
@@ -125,6 +135,7 @@ export async function openFile(path, opts = {}) {
       diffAvailable: hasDiff,
       diffDismissed: initialDismissed,
       openedInDiffView: initialOpenedInDiff,
+      diffRef: ref,
     };
     if (!isImg) {
       for (let i = 0; i < j.lines.length; i++) d.lines[j.start + i] = j.lines[i];
@@ -151,9 +162,9 @@ export async function openFile(path, opts = {}) {
         d.openedInDiffView = true;
       } else {
         d.diffMode = null;
-        setStatusNote('No diff for ' + d.name + ' — showing source', 3000);
+        if (!soft) setStatusNote('No diff for ' + d.name + ' — showing source', 3000);
       }
-    } else if (d.diffAvailable && !d.diffDismissed && d.diffMode === null && (treeEl?.classList.contains('changed-only') || diffSelected)) {
+    } else if (d.diffAvailable && !d.diffDismissed && d.diffMode === null) {
       d.diffMode = layoutPref() || 'split';
       d.openedInDiffView = true;
     }
@@ -179,8 +190,6 @@ export async function openFile(path, opts = {}) {
   }
   render();
   updateStatus();
-  updateProblemsBadge(d);
-  if ($('#pane-right-problems')?.classList.contains('active')) renderProblemsPane();
   if ($('#panel-outline')?.classList.contains('active')) loadOutline();
   if (push) pushHistory(path, line || d.cur);
   saveWorkspaceState();
@@ -194,8 +203,12 @@ export async function openFile(path, opts = {}) {
 // clean/untracked files, so the extra request is cheap and self-limiting.
 export async function loadGutter(d) {
   if (!S.meta?.git) return;
+  // Same stale-answer guard as drawDiff: the doc may be pointed at a different
+  // commit (or back at the working tree) before this resolves.
+  const ref = d.diffRef || '';
   try {
-    const j = await api('/api/gutter', { path: d.path });
+    const j = await api('/api/gutter', { path: d.path, ref });
+    if ((d.diffRef || '') !== ref) return;
     d.diffAvailable = !!j.available;
     if (j.available && d.diffMode === null && !d.diffDismissed && d.openedInDiffView) {
       d.diffMode = layoutPref() || 'split';
@@ -215,7 +228,6 @@ export async function loadGutter(d) {
     if (doc_() === d) {
       updateStatus();
       render();
-      if ($('#pane-right-problems')?.classList.contains('active')) renderProblemsPane();
     }
     drawTabs();
   } catch {}
@@ -243,11 +255,12 @@ export async function reloadOpenTabs({ onlyIfChanged = false } = {}) {
     path: t.path,
     anchor: t.cur || 1,
     start: t.cur ? Math.max(0, Math.floor((t.cur - 1) / CHUNK) * CHUNK) : 0,
+    ref: t.diffRef || '',
   }));
 
   let anyChanged = false;
   const results = await Promise.allSettled(
-    targets.map(tgt => api('/api/file', { path: tgt.path, start: tgt.start, count: CHUNK }))
+    targets.map(tgt => api('/api/file', { path: tgt.path, start: tgt.start, count: CHUNK, ref: tgt.ref }))
   );
 
   for (let i = 0; i < targets.length; i++) {
@@ -309,6 +322,7 @@ export async function reloadOpenTabs({ onlyIfChanged = false } = {}) {
       diffScroll: keep === activeDoc && keep.diffMode ? diffScrollTop() : 0,
       prCollapsed: keep.prCollapsed,
       youCollapsed: keep.youCollapsed,
+      diffRef: tgt.ref,
     };
 
     for (let k = 0; k < j.lines.length; k++) {
@@ -325,10 +339,6 @@ export async function reloadOpenTabs({ onlyIfChanged = false } = {}) {
   // Load all gutters concurrently before initial paint
   await Promise.allSettled(S.tabs.filter(t => !t.isImage).map(t => loadGutter(t)));
 
-  for (const t of S.tabs) {
-    t.problemsLoaded = false;
-  }
-
   const d = doc_();
   if (d) {
     S.lsp.state = (d.lsp && d.lsp.state) || 'off';
@@ -341,8 +351,6 @@ export async function reloadOpenTabs({ onlyIfChanged = false } = {}) {
     layout();
     vp.scrollTop = d.scrollTop;
     render();
-    updateProblemsBadge(d);
-    if ($('#pane-right-problems')?.classList.contains('active')) renderProblemsPane();
     if ($('#panel-outline')?.classList.contains('active')) loadOutline();
   }
 
@@ -452,9 +460,12 @@ export async function reopenClosedTab() {
 
 export function drawTabs() {
   $('#tabs').innerHTML = S.tabs.map((t, i) =>
-    '<div class="tab' + (i === S.active ? ' active' : '') + (t.isImage ? ' tab-image' : '') + (t.deleted ? ' tab-deleted' : '') + '" data-i="' + i + '" title="' + esc(t.path) + '">' +
+    '<div class="tab' + (i === S.active ? ' active' : '') + (t.isImage ? ' tab-image' : '') + (t.deleted ? ' tab-deleted' : '') + '" data-i="' + i +
+    '" title="' + esc(t.path) + (t.diffRef ? ' — in commit ' + esc(t.diffRef.slice(0, 7)) : '') + '">' +
     (t.isImage ? '<svg class="tab-icon" viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2" y="2" width="12" height="12" rx="2"/><circle cx="5.5" cy="5.5" r="1.5"/><path d="M14 10l-3.5-3.5L3 14"/></svg>' : '') +
     '<span class="tn">' + esc(t.name) + '</span>' +
+    // Pinned to a commit: the tab is not the working tree, and it should say so.
+    (t.diffRef ? '<span class="tab-ref">@' + esc(t.diffRef.slice(0, 7)) + '</span>' : '') +
     '<span class="x" data-close="' + i + '" title="' + withKeys('Close tab ({Alt+W})') + '"><svg viewBox="0 0 10 10" aria-hidden="true"><path d="M2 2l6 6M8 2l-6 6"/></svg></span></div>').join('');
   const act = $('#tabs .tab.active');
   if (act) act.scrollIntoView({ block: 'nearest', inline: 'nearest' });
@@ -480,8 +491,6 @@ export function switchTab(i) {
   drawTabs(); drawCrumbs(); layout();
   vp.scrollTop = S.tabs[i].scrollTop;
   render(); updateStatus();
-  updateProblemsBadge(S.tabs[i]);
-  if ($('#pane-right-problems')?.classList.contains('active')) renderProblemsPane();
   if ($('#panel-outline')?.classList.contains('active')) loadOutline();
   pushHistory(S.tabs[i].path, S.tabs[i].cur);
   saveWorkspaceState();
@@ -493,7 +502,7 @@ export function saveWorkspaceState() {
   if (saveSessionTimer) clearTimeout(saveSessionTimer);
   saveSessionTimer = setTimeout(async () => {
     try {
-      const tabs = S.tabs.map(t => ({ path: t.path }));
+      const tabs = S.tabs.map(t => ({ path: t.path, ref: t.diffRef || '' }));
       await apiPostJson('/api/session', { tabs, active: S.active });
     } catch {}
   }, 200);
@@ -504,7 +513,7 @@ export async function restoreWorkspaceTabs() {
     const session = await api('/api/session');
     if (!session || !Array.isArray(session.tabs) || session.tabs.length === 0) return false;
     for (const t of session.tabs) {
-      if (t.path) await openFile(t.path, { push: false });
+      if (t.path) await openFile(t.path, { push: false, ref: t.ref || '' });
     }
     if (typeof session.active === 'number' && session.active >= 0 && session.active < S.tabs.length) {
       switchTab(session.active);

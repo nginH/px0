@@ -66,13 +66,19 @@ type threadTurn struct {
 // started, which is context for the harness and a jump target for the reader,
 // not a limit on what it may change.
 type thread struct {
-	ID             string        `json:"id"`
-	Title          string        `json:"title"`
-	Kind           string        `json:"kind,omitempty"` // "edit" or "batch" when started from inline edits; empty for a conversation
-	Path           string        `json:"path,omitempty"`
-	L1             int           `json:"l1,omitempty"`
-	L2             int           `json:"l2,omitempty"`
-	Snippet        string        `json:"snippet,omitempty"`
+	ID      string `json:"id"`
+	Title   string `json:"title"`
+	Kind    string `json:"kind,omitempty"` // "edit" or "batch" when started from inline edits; empty for a conversation
+	Path    string `json:"path,omitempty"`
+	L1      int    `json:"l1,omitempty"`
+	L2      int    `json:"l2,omitempty"`
+	Snippet string `json:"snippet,omitempty"`
+	// Scope is what a PR-review thread is about: "pr" (the whole pull request),
+	// "mine" (the reviewer's own changes on top of it) or "selection" (just the
+	// anchored code). ScopeSent is the scope the harness was last told, so a
+	// change of scope is announced once rather than every turn.
+	Scope          string        `json:"scope,omitempty"`
+	ScopeSent      string        `json:"scopeSent,omitempty"`
 	Created        int64         `json:"created"`
 	Updated        int64         `json:"updated"`
 	SessionID      string        `json:"sessionId,omitempty"`
@@ -112,12 +118,15 @@ type threadManager struct {
 	root  string
 	file  string // empty when there is nowhere to persist
 
-	mu       sync.Mutex
-	threads  map[string]*thread
-	cancels  map[string]context.CancelFunc // one running turn per thread
-	jobs     map[int64]*threadJobRef       // inline/batch edits, polled as agent jobs
-	subs     map[string]map[chan threadEvent]struct{}
-	lastSave time.Time
+	mu      sync.Mutex
+	threads map[string]*thread
+	cancels map[string]context.CancelFunc // one running turn per thread
+	// prContext, when set (PR review sessions), describes the pull request the
+	// workspace is a checkout of; it goes into the first prompt of a thread.
+	prContext func(scope string) string
+	jobs      map[int64]*threadJobRef // inline/batch edits, polled as agent jobs
+	subs      map[string]map[chan threadEvent]struct{}
+	lastSave  time.Time
 }
 
 // threadStorePath keeps every workspace's threads beside settings.json, never
@@ -283,7 +292,7 @@ func cloneThread(t *thread) *thread {
 
 // Create opens a thread anchored at path:l1-l2 (path may be empty for a thread
 // about the workspace as a whole) and starts its first turn.
-func (tm *threadManager) Create(abs, rel string, l1, l2 int, message string) (*thread, error) {
+func (tm *threadManager) Create(abs, rel string, l1, l2 int, message, scope string) (*thread, error) {
 	message = strings.TrimSpace(message)
 	if message == "" {
 		return nil, errors.New("message is empty")
@@ -292,6 +301,7 @@ func (tm *threadManager) Create(abs, rel string, l1, l2 int, message string) (*t
 		ID:      newThreadID(),
 		Title:   threadTitle(message),
 		Path:    rel,
+		Scope:   cleanThreadScope(scope),
 		Created: time.Now().UnixMilli(),
 	}
 	t.Updated = t.Created
@@ -315,6 +325,30 @@ func (tm *threadManager) Create(abs, rel string, l1, l2 int, message string) (*t
 		return nil, err
 	}
 	return tm.Get(t.ID), nil
+}
+
+func cleanThreadScope(s string) string {
+	switch s {
+	case "pr", "mine", "selection":
+		return s
+	}
+	return ""
+}
+
+// SetScope changes what a thread is about; the harness hears of it with the
+// next message.
+func (tm *threadManager) SetScope(id, scope string) error {
+	scope = cleanThreadScope(scope)
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	t := tm.threads[id]
+	if t == nil {
+		return errThreadGone
+	}
+	t.Scope = scope
+	tm.saveLocked()
+	tm.publishThreadLocked(t)
+	return nil
 }
 
 // threadNative reports whether px0 can hand this harness its own session.
@@ -363,7 +397,7 @@ func threadArgv(name string, template []string, sessionID string, resume bool) [
 // threadPrompt composes what the harness is told for one turn. The anchor and
 // ground rules go in only when the harness has no memory of them: the first
 // turn, or a replay after a harness switch.
-func threadPrompt(t *thread, prior []*threadTurn, message string, replay bool) string {
+func threadPrompt(t *thread, prior []*threadTurn, message string, replay bool, prCtx string, scopeChanged bool) string {
 	var b strings.Builder
 	if len(prior) == 0 || replay {
 		if t.Kind == "edit" || t.Kind == "batch" {
@@ -375,6 +409,10 @@ func threadPrompt(t *thread, prior []*threadTurn, message string, replay bool) s
 			b.WriteString("You are helping with a long-running conversation about the code in this workspace. ")
 			b.WriteString("You may read any file and edit any file needed to carry out what is asked; make edits directly. ")
 			b.WriteString("When you finish a request, reply with a concise summary: what you found or changed, and in which files.\n\n")
+		}
+		if prCtx != "" {
+			b.WriteString(prCtx)
+			b.WriteString("\n\n")
 		}
 		if t.Path != "" && t.Kind != "batch" { // a batch carries its own snippets
 			ext := strings.TrimPrefix(filepath.Ext(t.Path), ".")
@@ -400,6 +438,11 @@ func threadPrompt(t *thread, prior []*threadTurn, message string, replay bool) s
 		b.WriteString("### Earlier in this conversation\n")
 		b.WriteString(hist)
 		b.WriteString("### Current request\n")
+	}
+	if scopeChanged && prCtx != "" && len(prior) > 0 && !replay {
+		b.WriteString("The user has changed what this conversation is about. ")
+		b.WriteString(prCtx)
+		b.WriteString("\n\n")
 	}
 	if t.Kind == "edit" && len(prior) == 0 {
 		b.WriteString("### Instruction\n")
@@ -523,7 +566,21 @@ func (tm *threadManager) runTurn(ctx context.Context, cancel context.CancelFunc,
 	}
 	tm.mu.Unlock()
 
-	prompt := threadPrompt(t, r.prior, r.message, replay)
+	prCtx, scopeChanged := "", false
+	if tm.prContext != nil {
+		tm.mu.Lock()
+		scope := t.Scope
+		scopeChanged = scope != t.ScopeSent
+		tm.mu.Unlock()
+		prCtx = tm.prContext(scope)
+		if prCtx != "" {
+			tm.mu.Lock()
+			t.ScopeSent = scope
+			tm.saveLocked()
+			tm.mu.Unlock()
+		}
+	}
+	prompt := threadPrompt(t, r.prior, r.message, replay, prCtx, scopeChanged)
 	argv := r.base
 	if native {
 		argv = threadArgv(r.name, r.base, sessionID, live)
@@ -1054,6 +1111,7 @@ func (s *Server) handleThreadCreate(w http.ResponseWriter, r *http.Request) {
 		L1      int    `json:"l1"`
 		L2      int    `json:"l2"`
 		Message string `json:"message"`
+		Scope   string `json:"scope"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		fail(w, 400, "bad request")
@@ -1067,7 +1125,7 @@ func (s *Server) handleThreadCreate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	t, err := s.threads.Create(abs, rel, body.L1, body.L2, body.Message)
+	t, err := s.threads.Create(abs, rel, body.L1, body.L2, body.Message, body.Scope)
 	if err != nil {
 		fail(w, threadStatus(err), err.Error())
 		return
@@ -1100,6 +1158,25 @@ func (s *Server) handleThreadCancel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"cancelled": s.threads.Cancel(r.URL.Query().Get("id"))})
+}
+
+func (s *Server) handleThreadScope(w http.ResponseWriter, r *http.Request) {
+	if !localPost(w, r) || !s.threadsOrFail(w) {
+		return
+	}
+	var body struct {
+		ID    string `json:"id"`
+		Scope string `json:"scope"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		fail(w, 400, "bad request")
+		return
+	}
+	if err := s.threads.SetScope(body.ID, body.Scope); err != nil {
+		fail(w, threadStatus(err), err.Error())
+		return
+	}
+	writeJSON(w, s.threads.Get(body.ID))
 }
 
 func (s *Server) handleThreadDelete(w http.ResponseWriter, r *http.Request) {

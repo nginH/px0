@@ -119,6 +119,10 @@ Every mutating endpoint is guarded by `localPost`, and carries the same security
 
 The list stream is opened once at startup and drives the running indicators and the tab reload. The per-thread stream is opened when a thread is opened and closed when leaving it. Replies are rendered by a small escape-first Markdown subset (`thrMd`): fences, inline code, bold and bullet lists, so a reply can never inject markup.
 
+## 8b. PR Scope
+
+A thread in a PR session carries `scope` (`pr`, `mine`, `selection`) and `scopeSent`. `Server.prThreadContext(scope)` builds the text: the PR's number and title, then the exact range for the scope (`git diff <merge-base> <head>` for `pr`, `git diff <head>` plus the untracked files for `mine`) and the same diff written to a temp file (`prSession.writeScopeFile`, removed in `Close`). It goes in with the first prompt, with a replay, and once more whenever `scope != scopeSent`. `POST /api/threads/scope` changes it. Outside a PR session the context is empty.
+
 ## 9. Limits
 
 - Only `claude` and `cursor-agent` resume natively. Others are replayed, and replay is capped at 16 KB of history.

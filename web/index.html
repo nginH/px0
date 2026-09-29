@@ -15,12 +15,32 @@
 <!-- Every web/themes/*.css joined by the server. See docs/internals/styling-and-themes.md. -->
 <link rel="stylesheet" href="static/themes.css">
 </head>
-<body class="right-hidden">
+<body>
 <div id="app">
   <!-- SECTION: Sidebar (File explorer tree) -->
   <aside id="side">
     <header class="panel-head"><span id="root-name">-</span><span class="panel-actions"><div class="sidebar-toggle" role="group" aria-label="Explorer view mode"><button id="btn-files" class="toggle-btn active" title="File Explorer (show all files)" aria-label="File Explorer"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></button><button id="btn-changed" class="toggle-btn" title="Git changes (show changed files only)" aria-label="Git changes"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="9" r="2.5"/><path d="M6 8.5v7M18 11.5c0 3-3 3.5-6 3.5"/></svg></button></div><button id="btn-collapse-tree" class="mini" title="Collapse all folders" aria-label="Collapse all folders"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="7 11 12 6 17 11"/><polyline points="7 18 12 13 17 18"/></svg></button><button id="btn-expand-tree" class="mini" title="Expand all project folders (ignored folders stay closed)" aria-label="Expand all project folders"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="7 6 12 11 17 6"/><polyline points="7 13 12 18 17 13"/></svg></button><button id="btn-reindex" class="mini" title="Re-index"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button></span></header>
+    <!-- PR review only (web/src/prscope.js): whole PR vs just your own changes -->
+    <div id="scope-bar" class="scope-bar" role="group" aria-label="Changes to show" hidden>
+      <button type="button" data-scope="all" class="active" aria-pressed="true" title="Every file this PR changes, plus your edits">PR changes <span id="scope-all-n" class="scope-n">0</span></button>
+      <button type="button" data-scope="yours" aria-pressed="false" title="Only files you have edited or committed since checkout">Yours <span id="scope-yours-n" class="scope-n">0</span></button>
+    </div>
     <div class="panel-body" id="tree"></div>
+    <!-- Unpushed commits: the local commits ahead of the tracking branch,
+         listed beside the tree while the "changed files only" filter is on.
+         web/src/unpushed.js owns it. -->
+    <div id="unpushed" class="unpushed" hidden>
+      <div id="unpushed-resizer" class="unpushed-resizer" title="Drag to resize"></div>
+      <div class="unpushed-head">
+        <svg class="unpushed-icon" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>
+        <span class="unpushed-title">Unpushed</span>
+        <span id="unpushed-count" class="unpushed-count"></span>
+        <span class="grow"></span>
+        <span id="unpushed-upstream" class="unpushed-upstream"></span>
+        <button id="unpushed-collapse" class="pr-comments-collapse" title="Collapse/expand unpushed commits">&#9662;</button>
+      </div>
+      <div id="unpushed-body" class="unpushed-body"></div>
+    </div>
     <div id="git-panel" class="git-panel" hidden>
       <div id="git-panel-resizer" class="git-panel-resizer" title="Drag to resize"></div>
       <div class="git-panel-head">
@@ -309,6 +329,9 @@
     <!-- Tree context menu: file & folder actions on the left sidebar -->
     <div id="tree-menu" role="menu" hidden></div>
 
+    <!-- Commit card: author, message and diffstat for a hovered unpushed commit -->
+    <div id="commitcard" hidden></div>
+
     <!-- Metrics menu, opened from CPU/RAM status bar -->
     <div id="metrics-menu" role="menu" hidden></div>
 
@@ -366,7 +389,6 @@
     <header class="inspector-head">
       <div class="inspector-tabs">
         <button class="inspector-tab" data-itab="threads" id="tab-threads" title="Long-running conversations with a coding harness ({Alt+T} on a selection)" hidden>Threads<span class="thr-tab-count" hidden></span><span class="thr-tab-dot" hidden></span></button>
-        <button class="inspector-tab" data-itab="problems" id="tab-problems" title="Compiler, type, and linter problems in active file ({Mod+Shift+M})">Problems<span class="prob-tab-badge" id="prob-tab-badge" hidden></span></button>
         <button class="inspector-tab active" data-itab="refs" title="View references across workspace">References</button>
         <button class="inspector-tab" data-itab="symbols" title="View file symbols outline">Symbols</button>
         <button class="inspector-tab" data-itab="calls" title="Trace callers and callees ({Alt+Shift+H})">Calls</button>
@@ -376,21 +398,6 @@
         <button id="btn-close-right" class="mini" title="Close inspector (Esc)">&#10005;</button>
       </div>
     </header>
-
-    <!-- Right Pane 0: Problems / Diagnostics for active file -->
-    <section class="inspector-pane" id="pane-right-problems">
-      <div class="inspector-bar prob-bar">
-        <span class="inspector-sym-title" id="prob-summary">Problems</span>
-        <div class="prob-filters" id="prob-filters">
-          <button class="opt on" data-prob-filter="all" title="All problems in file">All</button>
-          <button class="opt" data-prob-filter="changed" id="prob-filter-changed" title="Problems on added or modified lines" hidden>Changed lines</button>
-          <button class="opt" data-prob-filter="errors" title="Errors only">Errors</button>
-        </div>
-      </div>
-      <div class="panel-body prob-body" id="prob-list">
-        <div class="hint">Loading diagnostics…</div>
-      </div>
-    </section>
 
     <!-- Right Pane 1: References for active symbol -->
     <section class="inspector-pane active" id="pane-right-refs">
@@ -490,6 +497,13 @@
         <div id="thr-anchor" class="thr-anchor" hidden></div>
         <div id="thr-msgs" class="thr-msgs"></div>
         <div class="thr-compose">
+          <!-- PR review only: what this thread is about (thread.js) -->
+          <div id="thr-scope" class="thr-scope" role="group" aria-label="What this thread is about" hidden>
+            <span class="thr-scope-label">About</span>
+            <button type="button" data-scope="pr" title="The whole pull request: merge-base to PR head">Whole PR</button>
+            <button type="button" data-scope="mine" title="Only your own changes on top of the PR (uncommitted and unpushed)">My changes</button>
+            <button type="button" data-scope="selection" title="Just the code this thread is anchored to">Selection</button>
+          </div>
           <div class="agent-meta">
             <span class="agent-meta-label">Model</span>
             <select class="agent-harness-select" id="thr-harness" title="Coding harness"></select>
