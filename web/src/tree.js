@@ -152,6 +152,7 @@ export async function refreshTree() {
   if (isCurrent() && treeEl.classList.contains('changed-only')) {
     await expandDirtyDirs();
   }
+  markTreeCleanState();
 }
 
 export function restoreOpenDirs(dirs) {
@@ -331,6 +332,7 @@ export async function patchTreeGitStatus(statuses = {}, dirtyDirs = {}, staged =
 
   if (needRefresh) {
     await refreshTree();
+    markTreeCleanState();
     return;
   }
 
@@ -449,9 +451,11 @@ export async function patchTreeGitStatus(statuses = {}, dirtyDirs = {}, staged =
 /* In Git view with a clean working tree the tree renders nothing (every row is
    filtered out), so it stops claiming the sidebar's spare height and says why.
    The Unpushed section below it is then the whole of the view. */
-function markTreeCleanState() {
-  treeEl.classList.toggle('no-changes',
-    treeEl.classList.contains('changed-only') && !(S.meta?.gitChanges > 0));
+export function markTreeCleanState() {
+  const hasDirtyRows = !!treeEl?.querySelector('.tr.file.dirty');
+  const hasChanges = (S.meta?.gitChanges > 0) || hasDirtyRows;
+  treeEl?.classList.toggle('no-changes',
+    treeEl?.classList.contains('changed-only') && !hasChanges);
 }
 
 export function hasGitView() {

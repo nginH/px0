@@ -20,6 +20,8 @@ Thumbs.db
 # Build artifacts
 build/
 web/app.js
+web/vendor/*.min.js
+!web/vendor/*.min.js.gz
 
 # Logs
 *.log

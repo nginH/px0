@@ -555,17 +555,15 @@ func injectDeletedNodes(children map[string][]Node, gs map[string]string, staged
 	}
 
 	for p, st := range gs {
-		if st == "D" {
-			yst := ""
-			if ys != nil {
-				yst = ys[p]
-			}
-			apply(p, st, staged != nil && staged[p], yst)
+		yst := ""
+		if ys != nil {
+			yst = ys[p]
 		}
+		apply(p, st, staged != nil && staged[p], yst)
 	}
 	if ys != nil {
 		for p, st := range ys {
-			if st == "D" && (gs == nil || gs[p] != "D") {
+			if gs == nil || gs[p] == "" {
 				apply(p, "", staged != nil && staged[p], st)
 			}
 		}

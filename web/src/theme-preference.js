@@ -1,4 +1,4 @@
-export const DEFAULT_THEME = 'github-dark';
+export const DEFAULT_THEME = 'catppuccin-mocha';
 
 export function chooseThemePreference(savedTheme, configuredTheme, fallbackTheme = DEFAULT_THEME) {
   const explicit = configuredTheme && configuredTheme !== fallbackTheme ? configuredTheme : null;

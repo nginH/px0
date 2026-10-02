@@ -45,7 +45,6 @@ export function initGitStream() {
 export function triggerRefresh() {
   if (!S.meta?.git) return Promise.resolve();
   if (refreshing) return refreshing;
-  if (Date.now() - lastRefreshAt < REFRESH_COOLDOWN_MS) return Promise.resolve();
   refreshing = (async () => {
     try {
       const data = await apiPost('/api/git/refresh');
@@ -149,9 +148,21 @@ async function handleGitStatus(data) {
   const yourDirtyDirs = data.yourDirtyDirs || {};
 
   // Patch rendered tree items in place without full DOM reload
-  await patchTreeGitStatus(statuses, dirtyDirs, staged, yourStatuses, yourDirtyDirs);
-  updateScopeCounts(statuses, yourStatuses);
-  updateGitPanel(data);
+  try {
+    await patchTreeGitStatus(statuses, dirtyDirs, staged, yourStatuses, yourDirtyDirs);
+  } catch (err) {
+    console.error('Failed to patch tree git status', err);
+  }
+  try {
+    updateScopeCounts(statuses, yourStatuses);
+  } catch (err) {
+    console.error('Failed to update scope counts', err);
+  }
+  try {
+    updateGitPanel(data);
+  } catch (err) {
+    console.error('Failed to update git panel', err);
+  }
 
   // Close tabs that were opened in git diff view or currently in diff view if their changes are gone.
   // In PR review mode, tabs should remain open even if clean relative to HEAD.

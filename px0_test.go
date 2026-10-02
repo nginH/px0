@@ -167,6 +167,84 @@ func TestThemesStylesheetJoinsEveryThemeFile(t *testing.T) {
 	}
 }
 
+func TestStaticAssetServing(t *testing.T) {
+	s, _ := newTestServer(t)
+
+	// 1. Serving uncompressed assets (e.g. style.css)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/static/style.css", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("style.css status %d", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/css") {
+		t.Errorf("style.css content-type: %s", ct)
+	}
+
+	// 2. Serving compressed vendor assets with Accept-Encoding: gzip
+	rec = httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/static/vendor/mermaid-12.0.0.min.js", nil)
+	req.Header.Set("Accept-Encoding", "gzip, deflate, br")
+	s.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("mermaid gzip status %d", rec.Code)
+	}
+	if ce := rec.Header().Get("Content-Encoding"); ce != "gzip" {
+		t.Errorf("mermaid content-encoding = %q, want gzip", ce)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/javascript") {
+		t.Errorf("mermaid content-type = %q, want text/javascript", ct)
+	}
+	gzr, err := gzip.NewReader(rec.Body)
+	if err != nil {
+		t.Fatalf("failed to create gzip reader: %v", err)
+	}
+	decompressed, err := io.ReadAll(gzr)
+	gzr.Close()
+	if err != nil {
+		t.Fatalf("failed to decompress gzip body: %v", err)
+	}
+	if bytes.HasPrefix(decompressed, []byte("\x1f\x8b")) {
+		t.Errorf("decompressed mermaid body is still gzipped (double gzip detected)")
+	}
+	if !strings.HasPrefix(string(decompressed), "\"use strict\";") {
+		t.Errorf("decompressed mermaid body missing expected javascript prefix")
+	}
+	if !strings.Contains(string(decompressed), "mermaid") {
+		t.Errorf("decompressed mermaid body missing 'mermaid' keyword")
+	}
+
+	// 3. Serving compressed vendor assets without Accept-Encoding: gzip (transparent decompression)
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/static/vendor/mermaid-12.0.0.min.js", nil)
+	s.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("mermaid uncompressed status %d", rec.Code)
+	}
+	if ce := rec.Header().Get("Content-Encoding"); ce != "" {
+		t.Errorf("mermaid content-encoding without gzip request = %q, want none", ce)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/javascript") {
+		t.Errorf("mermaid content-type = %q, want text/javascript", ct)
+	}
+	if !strings.Contains(rec.Body.String(), "mermaid") {
+		t.Errorf("uncompressed mermaid body missing 'mermaid' keyword")
+	}
+
+	// 4. Missing static file returns 404
+	rec = httptest.NewRecorder()
+	s.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/static/nonexistent.js", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("missing asset status = %d, want 404", rec.Code)
+	}
+
+	// 5. Path traversal attempts are rejected (never 200 OK)
+	rec = httptest.NewRecorder()
+	s.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/static/../server.go", nil))
+	if rec.Code == http.StatusOK {
+		t.Errorf("traversal returned 200 OK")
+	}
+}
+
 func TestIndexHonoursGitignore(t *testing.T) {
 	s, _ := newTestServer(t)
 	for _, f := range s.ix.Files() {

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -284,41 +283,7 @@ func (gw *GitWatcher) Subscribe() (<-chan []byte, func()) {
 	inGit := gitAvailable(gw.root)
 	var initialMsg []byte
 	if inGit {
-		count, files := gw.ix.GitChanges()
-		statuses := gw.ix.GitStatusMap()
-		staged := gw.ix.GitStagedMap()
-		yourStatuses := gw.ix.GitYourStatusMap()
-		dirtyDirs := map[string]bool{}
-		for p := range statuses {
-			for i := strings.LastIndexByte(p, '/'); i >= 0; i = strings.LastIndexByte(p, '/') {
-				p = p[:i]
-				dirtyDirs[p] = true
-			}
-		}
-		yourDirtyDirs := map[string]bool{}
-		for p := range yourStatuses {
-			for i := strings.LastIndexByte(p, '/'); i >= 0; i = strings.LastIndexByte(p, '/') {
-				p = p[:i]
-				yourDirtyDirs[p] = true
-			}
-		}
-		branch := gitCurrentBranch(gw.root)
-		ahead, behind := gw.aheadBehind()
-		payload := GitStatusPayload{
-			Git:           true,
-			GitChanges:    count,
-			GitFiles:      files,
-			Statuses:      statuses,
-			DirtyDirs:     dirtyDirs,
-			Staged:        staged,
-			YourStatuses:  yourStatuses,
-			YourDirtyDirs: yourDirtyDirs,
-			Branch:        branch,
-			RecentCommits: gitRecentCommits(gw.root, 5),
-			CommitsURL:    gitCommitsWebURL(gw.root, branch),
-			Ahead:         ahead,
-			Behind:        behind,
-		}
+		payload := gw.Refresh()
 		if data, err := json.Marshal(payload); err == nil {
 			initialMsg = []byte(fmt.Sprintf("event: git-status\ndata: %s\n\n", data))
 		}

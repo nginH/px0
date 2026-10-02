@@ -532,6 +532,109 @@ func TestGitWatcherCLICommitDetection(t *testing.T) {
 	}
 }
 
+func TestGitWatcherAfterCommitNewChanges(t *testing.T) {
+	if !gitInstalled() {
+		t.Skip("git not installed")
+	}
+	root := gitRepo(t)
+	ix := NewIndex(root)
+	ix.Build()
+
+	s := NewServer(ix, nil)
+	ts := httptest.NewServer(s.mux)
+	defer ts.Close()
+
+	// 1. Commit everything so working tree is clean
+	cmdAdd := exec.Command("git", "add", "-A")
+	cmdAdd.Dir = root
+	cmdAdd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+	if out, err := cmdAdd.CombinedOutput(); err != nil {
+		t.Fatalf("git add failed: %v\n%s", err, out)
+	}
+	cmd := exec.Command("git", "commit", "-m", "commit all")
+	cmd.Dir = root
+	cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git commit failed: %v\n%s", err, out)
+	}
+
+	count, _, changed, statuses, _, _, _, _ := ix.UpdateGitStatus()
+	if count != 0 || len(statuses) != 0 {
+		t.Fatalf("expected clean worktree after commit, got count=%d statuses=%v", count, statuses)
+	}
+	_ = changed
+
+	// 2. Add a brand new untracked file and modify an existing file
+	if err := os.WriteFile(filepath.Join(root, "brand_new.txt"), []byte("new file content\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "keep.go"), []byte("modified keep\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// 3. UpdateGitStatus should detect both and inject brand_new.txt into children
+	count2, files2, changed2, statuses2, _, _, _, _ := ix.UpdateGitStatus()
+	if !changed2 {
+		t.Errorf("expected changed=true after modifying worktree")
+	}
+	if count2 != 2 {
+		t.Errorf("expected count=2, got %d (files: %v)", count2, files2)
+	}
+	if statuses2["brand_new.txt"] != "U" {
+		t.Errorf("expected brand_new.txt to have status 'U', got %q", statuses2["brand_new.txt"])
+	}
+	if statuses2["keep.go"] != "M" {
+		t.Errorf("expected keep.go to have status 'M', got %q", statuses2["keep.go"])
+	}
+
+	// Verify ix.Children("") actually contains brand_new.txt
+	kids, ok := ix.Children("")
+	if !ok {
+		t.Fatal("expected Children(\"\") to return true")
+	}
+	foundBrandNew := false
+	for _, k := range kids {
+		if k.Name == "brand_new.txt" && !k.Dir && k.Status == "U" {
+			foundBrandNew = true
+			break
+		}
+	}
+	if !foundBrandNew {
+		t.Errorf("expected Children(\"\") to contain brand_new.txt with status 'U'")
+	}
+
+	// 4. Connect to SSE stream and verify Subscribe sends gitChanges: 2
+	req, err := http.NewRequest("GET", ts.URL+"/api/git/stream", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	reader := bufio.NewReader(resp.Body)
+	var initialData map[string]any
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			t.Fatalf("failed reading SSE stream: %v", err)
+		}
+		line = strings.TrimRight(line, "\r\n")
+		if strings.HasPrefix(line, "data: ") {
+			data := strings.TrimPrefix(line, "data: ")
+			if err := json.Unmarshal([]byte(data), &initialData); err == nil && initialData["git"] == true {
+				break
+			}
+		}
+	}
+
+	if gChanges, ok := initialData["gitChanges"].(float64); !ok || int(gChanges) != 2 {
+		t.Errorf("expected Subscribe initial data gitChanges=2, got %v", initialData["gitChanges"])
+	}
+}
+
 func TestGitStatusAgainstAndPRDiff(t *testing.T) {
 	if !gitInstalled() {
 		t.Skip("git not installed")

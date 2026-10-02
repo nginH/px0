@@ -1157,7 +1157,16 @@ func (s *Server) handleThreadCancel(w http.ResponseWriter, r *http.Request) {
 	if !localPost(w, r) || !s.threadsOrFail(w) {
 		return
 	}
-	writeJSON(w, map[string]any{"cancelled": s.threads.Cancel(r.URL.Query().Get("id"))})
+	id := r.URL.Query().Get("id")
+	if id == "" && r.Body != nil {
+		var body struct {
+			ID string `json:"id"`
+		}
+		if json.NewDecoder(r.Body).Decode(&body) == nil {
+			id = body.ID
+		}
+	}
+	writeJSON(w, map[string]any{"cancelled": s.threads.Cancel(id)})
 }
 
 func (s *Server) handleThreadScope(w http.ResponseWriter, r *http.Request) {
@@ -1183,7 +1192,20 @@ func (s *Server) handleThreadDelete(w http.ResponseWriter, r *http.Request) {
 	if !localPost(w, r) || !s.threadsOrFail(w) {
 		return
 	}
-	writeJSON(w, map[string]any{"deleted": s.threads.Delete(r.URL.Query().Get("id"))})
+	id := r.URL.Query().Get("id")
+	if id == "" && r.Body != nil {
+		var body struct {
+			ID string `json:"id"`
+		}
+		if json.NewDecoder(r.Body).Decode(&body) == nil {
+			id = body.ID
+		}
+	}
+	if id == "" {
+		fail(w, 400, "missing thread id")
+		return
+	}
+	writeJSON(w, map[string]any{"deleted": s.threads.Delete(id)})
 }
 
 // handleThreadStream is the SSE feed: one thread's snapshot and live deltas

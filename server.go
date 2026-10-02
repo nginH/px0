@@ -26,7 +26,8 @@ import (
 	"time"
 )
 
-//go:embed web
+//go:embed web/index.html web/style.css web/themes web/vendor
+//go:embed web/app.js
 var embedded embed.FS
 
 // assets is the embedded web/ directory.
@@ -52,11 +53,12 @@ func cleanBasePath(p string) string {
 type Server struct {
 	ix        *Index
 	lsp       *lspManager
-	agent     *agentManager  // nil unless main wires editing for this session
-	threads   *threadManager // nil unless editing is wired: threads run on the same harness
-	pr        *prSession     // nil unless main launched this process as `px0 pr ...`
-	diffBase  string         // ref /api/diff and /api/gutter diff against; "HEAD" unless in PR mode
-	prHeadSHA string         // PR mode only: the checked-out PR head commit. Frozen boundary between
+	tel       *TelemetryService // nil in tests; Track is nil-safe
+	agent     *agentManager     // nil unless main wires editing for this session
+	threads   *threadManager    // nil unless editing is wired: threads run on the same harness
+	pr        *prSession        // nil unless main launched this process as `px0 pr ...`
+	diffBase  string            // ref /api/diff and /api/gutter diff against; "HEAD" unless in PR mode
+	prHeadSHA string            // PR mode only: the checked-out PR head commit. Frozen boundary between
 	// the PR's own diff (diffBase..prHeadSHA) and the reviewer's local edits
 	// since checkout (prHeadSHA..working tree); refreshed on Pull.
 	gitWatcher *GitWatcher
@@ -96,7 +98,7 @@ func (s *Server) routePath(subpath string) string {
 func (s *Server) registerRoutes() {
 	sub, _ := fs.Sub(assets, "web")
 	staticPrefix := s.routePath("/static/")
-	s.mux.Handle(staticPrefix, http.StripPrefix(staticPrefix, http.FileServer(http.FS(sub))))
+	s.mux.Handle(staticPrefix, s.handleStatic(sub, staticPrefix))
 	s.mux.HandleFunc(s.routePath("/static/themes.css"), s.handleThemes)
 
 	if s.basePath != "/" && s.basePath != "" {
@@ -274,12 +276,32 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Add("Vary", "Accept-Encoding")
 		gz := gzipPool.Get().(*gzip.Writer)
 		gz.Reset(rec)
-		gw := &gzipWriter{ResponseWriter: rec, w: gz}
+		var disabled bool
+		gw := &gzipWriter{ResponseWriter: rec, w: gz, disabled: &disabled}
 		defer func() { gz.Close(); gzipPool.Put(gz) }()
 		out = gw
 	}
 
 	s.mux.ServeHTTP(out, r)
+}
+
+type gzipBypasser interface {
+	BypassGzip()
+}
+
+func bypassGzip(w http.ResponseWriter) {
+	curr := w
+	for curr != nil {
+		if b, ok := curr.(gzipBypasser); ok {
+			b.BypassGzip()
+			return
+		}
+		if u, ok := curr.(interface{ Unwrap() http.ResponseWriter }); ok {
+			curr = u.Unwrap()
+		} else {
+			break
+		}
+	}
 }
 
 var gzipPool = sync.Pool{New: func() any {
@@ -289,10 +311,28 @@ var gzipPool = sync.Pool{New: func() any {
 
 type gzipWriter struct {
 	http.ResponseWriter
-	w *gzip.Writer
+	w        *gzip.Writer
+	disabled *bool
+}
+
+func (g gzipWriter) BypassGzip() {
+	if g.disabled != nil {
+		*g.disabled = true
+	}
+	if g.w != nil {
+		g.w.Reset(io.Discard)
+	}
+}
+
+func (g gzipWriter) isDisabled() bool {
+	return g.disabled != nil && *g.disabled
 }
 
 func (g gzipWriter) WriteHeader(status int) {
+	if g.isDisabled() {
+		g.ResponseWriter.WriteHeader(status)
+		return
+	}
 	g.Header().Del("Content-Length")
 	if status == http.StatusNotModified || status == http.StatusNoContent {
 		g.Header().Del("Content-Encoding")
@@ -304,15 +344,15 @@ func (g gzipWriter) WriteHeader(status int) {
 }
 
 func (g gzipWriter) Write(b []byte) (int, error) {
-	g.Header().Del("Content-Length")
-	if g.w != nil {
-		return g.w.Write(b)
+	if g.isDisabled() || g.w == nil {
+		return g.ResponseWriter.Write(b)
 	}
-	return g.ResponseWriter.Write(b)
+	g.Header().Del("Content-Length")
+	return g.w.Write(b)
 }
 
 func (g gzipWriter) Flush() {
-	if g.w != nil {
+	if !g.isDisabled() && g.w != nil {
 		_ = g.w.Flush()
 	}
 	if flusher, ok := g.ResponseWriter.(http.Flusher); ok {
@@ -611,6 +651,92 @@ func (s *Server) handleThemes(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/css; charset=utf-8")
 	io.WriteString(w, css.String())
+}
+
+func staticContentType(p string) string {
+	ext := strings.ToLower(path.Ext(p))
+	switch ext {
+	case ".js":
+		return "text/javascript; charset=utf-8"
+	case ".css":
+		return "text/css; charset=utf-8"
+	case ".html":
+		return "text/html; charset=utf-8"
+	case ".json":
+		return "application/json; charset=utf-8"
+	case ".svg":
+		return "image/svg+xml"
+	case ".png":
+		return "image/png"
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	case ".gif":
+		return "image/gif"
+	case ".ico":
+		return "image/x-icon"
+	case ".woff2":
+		return "font/woff2"
+	case ".woff":
+		return "font/woff"
+	case ".ttf":
+		return "font/ttf"
+	}
+	if ct := mime.TypeByExtension(ext); ct != "" {
+		return ct
+	}
+	return "application/octet-stream"
+}
+
+func (s *Server) handleStatic(sub fs.FS, prefix string) http.Handler {
+	fileServer := http.StripPrefix(prefix, http.FileServer(http.FS(sub)))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rel := strings.TrimPrefix(r.URL.Path, prefix)
+		rel = path.Clean(strings.TrimPrefix(rel, "/"))
+		if rel == "." || strings.HasPrefix(rel, "..") {
+			http.NotFound(w, r)
+			return
+		}
+
+		// Check if a pre-compressed .gz asset exists for this path.
+		gzPath := rel + ".gz"
+		if gzFile, err := sub.Open(gzPath); err == nil {
+			defer gzFile.Close()
+			fi, err := gzFile.Stat()
+			if err == nil && !fi.IsDir() {
+				mimeType := staticContentType(rel)
+				if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+					bypassGzip(w)
+					w.Header().Set("Content-Type", mimeType)
+					w.Header().Set("Content-Encoding", "gzip")
+					w.Header().Set("Vary", "Accept-Encoding")
+					if strings.HasPrefix(rel, "vendor/") {
+						w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+					}
+					if rs, ok := gzFile.(io.ReadSeeker); ok {
+						http.ServeContent(w, r, path.Base(rel), fi.ModTime(), rs)
+						return
+					}
+					io.Copy(w, gzFile)
+					return
+				}
+
+				// Client does not accept gzip: decompress on the fly.
+				gzReader, err := gzip.NewReader(gzFile)
+				if err == nil {
+					defer gzReader.Close()
+					w.Header().Set("Content-Type", mimeType)
+					w.Header().Set("Vary", "Accept-Encoding")
+					if strings.HasPrefix(rel, "vendor/") {
+						w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+					}
+					io.Copy(w, gzReader)
+					return
+				}
+			}
+		}
+
+		fileServer.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
@@ -1329,6 +1455,7 @@ func (s *Server) handleGitCommit(w http.ResponseWriter, r *http.Request) {
 	if s.gitWatcher != nil {
 		s.gitWatcher.Trigger()
 	}
+	s.tel.Track("git_commit", nil)
 	writeJSON(w, map[string]any{"ok": true})
 }
 

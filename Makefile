@@ -72,4 +72,5 @@ publish:
 
 clean:
 	rm -f px0 web/app.js
+	touch web/app.js
 	rm -rf dist/

@@ -18,10 +18,10 @@ px0 ships with 14 curated themes ready for immediate use:
 
 | Theme Name | Identifier | Aesthetic & Style |
 | :--- | :--- | :--- |
-| **GitHub Dark** | `github-dark` | Classic GitHub Dark theme (Default) |
-| **Tokyo Night** | `tokyo-night` | Celebrated deep blue and neon palette |
-| **Catppuccin Mocha** | `catppuccin-mocha` | Soothing, low-contrast dark pastel palette |
+| **Catppuccin Mocha** | `catppuccin-mocha` | Soothing, low-contrast dark pastel palette (Default) |
 | **Catppuccin Latte** | `catppuccin-latte` | Warm, low-contrast light pastel palette |
+| **GitHub Dark** | `github-dark` | Classic GitHub Dark theme |
+| **Tokyo Night** | `tokyo-night` | Celebrated deep blue and neon palette |
 | **Dracula** | `dracula` | Vibrant purple and pink dark theme |
 | **Gruvbox Dark** | `gruvbox-dark` | Retro groove warm dark palette |
 | **Gruvbox Light** | `gruvbox-light` | Retro groove warm parchment light palette |

@@ -229,13 +229,9 @@ func downloadVerifiedAsset(client *http.Client, assetURL, checksumURL, assetName
 // started listening, so px0 never makes a network call before serving. It
 // reuses the cached daily-check state so it only hits the network once
 // every updateCheckPeriod; on the days it does check, a newer release is
-// installed immediately and the process re-execs into the new binary so
-// this invocation runs the update instead of the stale one. Any failure
-// (network, permissions, verification) is non-fatal: px0 continues running
-// on the current binary. Because the re-exec replaces the process image
-// outright, an update that lands mid-session drops in-flight connections
-// and any open browser tab loses its socket; the browser's UI will show a
-// disconnect until it reconnects to the freshly restarted server.
+// installed in place and a notice is printed on the CLI instructing the user
+// to restart px0. Any failure (network, permissions, verification) is non-fatal:
+// px0 continues running on the current binary.
 func autoUpdate(currentVersion string) {
 	if uiQuiet {
 		return
@@ -303,13 +299,7 @@ func autoUpdate(currentVersion string) {
 
 	writeUpdateState(&updateState{LastChecked: time.Now(), LatestVer: latestVer})
 
-	uiStatus("ok", fmt.Sprintf("px0 has been updated to v%s", latestVer), "restarting now to run the new version...", 0, os.Stdout)
-
-	if err := reexecSelf(execPath, os.Args, os.Environ()); err != nil {
-		uiStatus("warn", fmt.Sprintf("updated to v%s but failed to restart: %v", latestVer, err), "please re-run px0", 0, os.Stderr)
-	}
-	// On success reexecSelf never returns (Unix replaces the process image;
-	// Windows exits after the child finishes).
+	uiStatus("ok", fmt.Sprintf("px0 has been updated to v%s", latestVer), "restart px0 to see the latest changes", 0, os.Stdout)
 }
 
 // runSelfUpdate implements px0 --update.

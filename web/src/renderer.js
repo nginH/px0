@@ -215,7 +215,7 @@ export function decorate(first, last) {
     for (const row of rowsEl.children) {
       const n = +row.dataset.l;
       if (!byLine.has(n)) continue;
-      const marks = markNodes($('.c', row), S.find.q, S.find.ci, 'mark');
+      const marks = markNodes($('.c', row), S.find.q, S.find.cs, 'mark');
       if (act && act.line === n && marks[act.n]) marks[act.n].classList.add('on');
     }
   }

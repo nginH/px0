@@ -379,7 +379,9 @@ function thrDrawList() {
   thrEl.list.innerHTML = items.map(t =>
     '<div class="thr-item' + (thr.cur && thr.cur.id === t.id ? ' sel' : '') + '" data-id="' + esc(t.id) + '" role="button" tabindex="0">' +
     '<div class="thr-item-title">' + (t.running ? '<span class="thr-spin" title="Working"></span>' : t.failed ? '<span class="thr-fail" title="Last reply failed">!</span>' : '') +
-    '<span>' + esc(t.title) + '</span>' + (t.kind ? '<span class="thr-kind">' + (t.kind === 'batch' ? 'batch' : 'inline') + '</span>' : '') + '</div>' +
+    '<span class="thr-item-title-text">' + esc(t.title) + '</span>' + (t.kind ? '<span class="thr-kind">' + (t.kind === 'batch' ? 'batch' : 'inline') + '</span>' : '') +
+    '<button class="thr-item-del mini" data-del="' + esc(t.id) + '" title="Delete this thread" aria-label="Delete thread"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg></button>' +
+    '</div>' +
     '<div class="thr-item-meta"><span class="thr-item-ref">' + esc(thrRefText(t)) + '</span>' +
     '<span>' + t.turns + (t.turns === 1 ? ' turn' : ' turns') + ' · ' + thrAgo(t.updated) + '</span></div></div>').join('');
 }
@@ -635,6 +637,24 @@ async function thrSend() {
   }
 }
 
+export async function deleteThread(id) {
+  if (!id) return;
+  const t = thr.list.find(x => x.id === id) || (thr.cur?.id === id ? thr.cur : null);
+  const title = t?.title ? `"${t.title}"` : 'this thread';
+  if (!confirm(`Delete ${title} and its transcript?`)) return;
+  try {
+    await apiPost('/api/threads/delete', { id });
+    if (thr.cur && thr.cur.id === id) thrBack();
+  } catch (e) {
+    showToast('!', e.message);
+  }
+}
+
+export function deleteCurrentThread() {
+  if (thr.cur) deleteThread(thr.cur.id);
+  else showToast('!', 'No thread currently open');
+}
+
 export function initThreads() {
   thrEl.listView = $('#thr-list-view');
   thrEl.threadView = $('#thr-thread-view');
@@ -662,12 +682,8 @@ export function initThreads() {
   thrEl.stop.addEventListener('click', () => {
     if (thr.cur) apiPost('/api/threads/cancel', { id: thr.cur.id }).catch(e => showToast('!', e.message));
   });
-  thrEl.del.addEventListener('click', async () => {
-    if (!thr.cur || !confirm('Delete this thread and its transcript?')) return;
-    try {
-      await apiPost('/api/threads/delete', { id: thr.cur.id });
-      thrBack();
-    } catch (e) { showToast('!', e.message); }
+  thrEl.del.addEventListener('click', () => {
+    if (thr.cur) deleteThread(thr.cur.id);
   });
   thrEl.input.addEventListener('keydown', e => {
     // Typing here must not trigger editor shortcuts, or Esc closing the sidebar.
@@ -696,11 +712,28 @@ export function initThreads() {
     if (f) openFile(f.dataset.path);
   });
   const openFromList = e => {
+    const delBtn = /** @type {HTMLElement|null} */ (e.target)?.closest('[data-del]');
+    if (delBtn) {
+      e.stopPropagation();
+      e.preventDefault();
+      deleteThread(delBtn.dataset.del);
+      return;
+    }
     const item = /** @type {HTMLElement|null} */ (e.target)?.closest('.thr-item');
     if (item) openThread(item.dataset.id);
   };
   thrEl.list.addEventListener('click', openFromList);
-  thrEl.list.addEventListener('keydown', e => { if (e.key === 'Enter') openFromList(e); });
+  thrEl.list.addEventListener('keydown', e => {
+    if (e.key === 'Enter') {
+      openFromList(e);
+    } else if (e.key === 'Delete' || e.key === 'Backspace') {
+      const item = /** @type {HTMLElement|null} */ (e.target)?.closest('.thr-item');
+      if (item && item.dataset.id) {
+        e.preventDefault();
+        deleteThread(item.dataset.id);
+      }
+    }
+  });
   $$('[data-thr-filter]').forEach(b => b.addEventListener('click', () => {
     thr.filter = b.dataset.thrFilter;
     $$('[data-thr-filter]').forEach(x => x.classList.toggle('on', x === b));
