@@ -36,7 +36,8 @@ function buildWithBun() {
     entryFile,
     `--outfile=${outFile}`,
     '--target=browser',
-    '--format=iife'
+    '--format=iife',
+    '--minify'
   ], {
     cwd: rootDir,
     stdio: 'inherit'

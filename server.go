@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"compress/gzip"
 	"context"
 	"embed"
@@ -687,6 +688,117 @@ func staticContentType(p string) string {
 	return "application/octet-stream"
 }
 
+var (
+	vendorFetchMu sync.Mutex
+	vendorCDNs    = map[string]string{
+		"vendor/mermaid-12.0.0.min.js": "https://cdn.jsdelivr.net/npm/mermaid@12.0.0/dist/mermaid.min.js",
+	}
+)
+
+func vendorCacheDir() string {
+	if c := os.Getenv("XDG_CACHE_HOME"); c != "" {
+		return filepath.Join(c, "px0", "vendor")
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		return filepath.Join(home, ".px0", "cache", "vendor")
+	}
+	return filepath.Join(os.TempDir(), "px0-cache", "vendor")
+}
+
+type memGzFile struct {
+	*bytes.Reader
+	name    string
+	size    int64
+	modTime time.Time
+}
+
+func (m *memGzFile) Stat() (fs.FileInfo, error) { return m, nil }
+func (m *memGzFile) Close() error               { return nil }
+func (m *memGzFile) Name() string               { return m.name }
+func (m *memGzFile) Size() int64                { return m.size }
+func (m *memGzFile) Mode() fs.FileMode          { return 0644 }
+func (m *memGzFile) ModTime() time.Time         { return m.modTime }
+func (m *memGzFile) IsDir() bool                { return false }
+func (m *memGzFile) Sys() any                   { return nil }
+
+func openOrFetchVendorAsset(rel string) (fs.File, error) {
+	gzName := path.Base(rel) + ".gz"
+	cachedPath := filepath.Join(vendorCacheDir(), gzName)
+
+	// 1. Check local persistent cache
+	if f, err := os.Open(cachedPath); err == nil {
+		return f, nil
+	}
+
+	// 2. Check local repository web/ directory (for dev/test fallback)
+	localGz := filepath.Join("web", filepath.FromSlash(rel)+".gz")
+	if f, err := os.Open(localGz); err == nil {
+		return f, nil
+	}
+
+	cdnURL, ok := vendorCDNs[rel]
+	if !ok {
+		return nil, os.ErrNotExist
+	}
+
+	vendorFetchMu.Lock()
+	defer vendorFetchMu.Unlock()
+
+	// Double-check cache after acquiring lock
+	if f, err := os.Open(cachedPath); err == nil {
+		return f, nil
+	}
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Get(cdnURL)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("CDN returned HTTP %d for %s", resp.StatusCode, rel)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	// Compress downloaded asset with gzip level 9
+	var gzBuf bytes.Buffer
+	gw, err := gzip.NewWriterLevel(&gzBuf, gzip.BestCompression)
+	if err != nil {
+		gw = gzip.NewWriter(&gzBuf)
+	}
+	if _, err := gw.Write(body); err != nil {
+		gw.Close()
+		return nil, err
+	}
+	if err := gw.Close(); err != nil {
+		return nil, err
+	}
+
+	gzBytes := gzBuf.Bytes()
+
+	// Cache to disk for offline and subsequent requests
+	if err := os.MkdirAll(vendorCacheDir(), 0755); err == nil {
+		tmpPath := cachedPath + fmt.Sprintf(".%d.tmp", time.Now().UnixNano())
+		if err := os.WriteFile(tmpPath, gzBytes, 0644); err == nil {
+			_ = os.Rename(tmpPath, cachedPath)
+		}
+	}
+
+	if f, err := os.Open(cachedPath); err == nil {
+		return f, nil
+	}
+	return &memGzFile{
+		Reader:  bytes.NewReader(gzBytes),
+		name:    gzName,
+		size:    int64(len(gzBytes)),
+		modTime: time.Now(),
+	}, nil
+}
+
 func (s *Server) handleStatic(sub fs.FS, prefix string) http.Handler {
 	fileServer := http.StripPrefix(prefix, http.FileServer(http.FS(sub)))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -699,7 +811,11 @@ func (s *Server) handleStatic(sub fs.FS, prefix string) http.Handler {
 
 		// Check if a pre-compressed .gz asset exists for this path.
 		gzPath := rel + ".gz"
-		if gzFile, err := sub.Open(gzPath); err == nil {
+		gzFile, err := sub.Open(gzPath)
+		if err != nil && strings.HasPrefix(rel, "vendor/") {
+			gzFile, err = openOrFetchVendorAsset(rel)
+		}
+		if err == nil {
 			defer gzFile.Close()
 			fi, err := gzFile.Stat()
 			if err == nil && !fi.IsDir() {

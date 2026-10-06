@@ -184,7 +184,7 @@ Styles live under `/* ---------- markdown preview ---------- */` in [`web/style.
 
 ### Mermaid Diagrams
 
-Mermaid is a presentation-stage enhancement, not a server renderer. `renderFence` emits the same escaped `<pre><code>` and `data-line` metadata as every other fence. After `mdSanitize` has rejected repository-supplied SVG, `renderMermaidBlocks` lazy-loads the pinned, same-origin `web/vendor/mermaid-12.0.0.min.js` asset and inserts Mermaid's generated SVG. The runtime is embedded by `go:embed`, so diagrams work offline and under `-base-path` without a CDN or another process.
+Mermaid is a presentation-stage enhancement, not a server renderer. `renderFence` emits the same escaped `<pre><code>` and `data-line` metadata as every other fence. After `mdSanitize` has rejected repository-supplied SVG, `renderMermaidBlocks` lazy-loads the pinned, same-origin `web/vendor/mermaid-12.0.0.min.js` asset and inserts Mermaid's generated SVG. The runtime is fetched on demand at runtime and cached persistently under the user cache directory (`~/.px0/cache/vendor/`), keeping the compiled binary lean while still allowing diagrams to work offline after initial fetch and under `-base-path`.
 
 The adapter initializes Mermaid with `startOnLoad: false`, `securityLevel: strict`, disabled error rendering, and Mermaid's secure configuration keys. Diagram directives therefore cannot enable HTML labels, click callbacks, or a weaker security level. The returned `bindFunctions` hook is intentionally ignored.
 
