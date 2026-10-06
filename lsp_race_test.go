@@ -25,6 +25,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -36,6 +37,7 @@ type lspRaceFakeServer struct {
 	mu            sync.Mutex
 	didOpen       int
 	didChangeVers []int
+	didChangeRaw  []json.RawMessage // raw didChange params, for shape assertions
 }
 
 func (s *lspRaceFakeServer) run(r *io.PipeReader) {
@@ -61,6 +63,10 @@ func (s *lspRaceFakeServer) run(r *io.PipeReader) {
 			if json.Unmarshal(msg.Params, &p) == nil {
 				s.didChangeVers = append(s.didChangeVers, p.TextDocument.Version)
 			}
+			// Keep the raw params (they alias the frame buffer, which is
+			// fine for test lifetimes) so tests can assert on the change
+			// shape (ranged vs full text).
+			s.didChangeRaw = append(s.didChangeRaw, msg.Params)
 		}
 		s.mu.Unlock()
 	}
@@ -249,5 +255,146 @@ func TestCallCleansPendingOnWriteFailure(t *testing.T) {
 	cl.mu.Unlock()
 	if n != 0 {
 		t.Fatalf("pending holds %d entries after write failure: leaked", n)
+	}
+}
+
+// TestReplyDoesNotBlockReadLoop pins the readLoop → reply path: when the
+// server sends a server→client request (e.g. workspace/configuration) while
+// its stdin pipe is stuck full, the reply must be fire-and-forget. A
+// synchronous reply would deadlock — the writer blocks on the full stdin pipe
+// while the server blocks writing to us, and the readLoop would never drain
+// the server's output again.
+func TestReplyDoesNotBlockReadLoop(t *testing.T) {
+	cl := newLSPClient(lspServerDef{Name: "fake", Cmd: []string{"fake"}}, t.TempDir())
+	_, toServerW := io.Pipe()         // read end intentionally never drained: simulates
+	toClientR, toClientW := io.Pipe() // a server stuck writing to us
+	cl.in, cl.out = toServerW, bufio.NewReader(toClientR)
+	cl.beginWriteLoop()
+	go cl.readLoop()
+	// Nobody drains the server's stdin pipe: the first flush blocks the writer,
+	// simulating a server stuck writing to us while not reading its stdin.
+
+	sendFrame := func(body string) {
+		t.Helper()
+		if _, err := io.WriteString(toClientW, "Content-Length: "+strconv.Itoa(len(body))+"\r\n\r\n"+body); err != nil {
+			t.Fatalf("send frame: %v", err)
+		}
+	}
+	// 1. Server asks for configuration; the reply is enqueued fire-and-forget.
+	sendFrame(`{"jsonrpc":"2.0","id":1,"method":"workspace/configuration","params":{}}`)
+	// 2. The readLoop must still be alive to process what follows.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		sendFrame(`{"jsonrpc":"2.0","method":"$/progress","params":{"token":"t","value":{"kind":"begin"}}}`)
+		time.Sleep(50 * time.Millisecond)
+		if cl.busy() {
+			break // readLoop processed the notification: not stuck in reply()
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("readLoop stuck: reply() blocked on a synchronous write")
+		}
+	}
+	toServerW.Close()
+	toClientW.Close()
+}
+
+// TestSyncDocStaleReadDiscarded pins the syncDoc generation counter: when two
+// syncDocs race, the one with the older READ must not overwrite the newer
+// one's result, regardless of lock order. Without the counter, if B (newer
+// read) wins the lock first and A (stale read) second, A would send the older
+// text with a higher version and the server would be left stale.
+//
+// The test sets up the guard state directly: after a sync applies generation
+// N, a syncDoc with generation < N must be discarded even if its file content
+// differs.
+func TestSyncDocStaleReadDiscarded(t *testing.T) {
+	cl, srv := lspRaceWireClient(t)
+	path := filepath.Join(t.TempDir(), "f.go")
+	uri := pathToURI(path)
+	if err := os.WriteFile(path, []byte("base"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := cl.ensureOpen(path, "f.go"); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(200 * time.Millisecond) // let didOpen drain
+
+	// A normal sync applies and records its generation.
+	if err := os.WriteFile(path, []byte("package new\n// fresh-marker-bbb\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := cl.syncDoc(path, "f.go"); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(200 * time.Millisecond) // let didChange drain
+	srv.mu.Lock()
+	nBefore := len(srv.didChangeRaw)
+	srv.mu.Unlock()
+
+	// Simulate a stale reader: pretend a much newer generation already
+	// applied (e.g. a concurrent syncDoc that read later but won the lock
+	// first). The next syncDoc gets an older generation and must bail.
+	cl.mu.Lock()
+	cl.syncGen[uri] = cl.syncGenNext.Add(1) + 1000
+	cl.mu.Unlock()
+
+	if err := os.WriteFile(path, []byte("package old\n// stale-marker-aaa\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := cl.syncDoc(path, "f.go"); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(500 * time.Millisecond) // let the fake server drain
+
+	// The stale sync must not have sent anything.
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	if len(srv.didChangeRaw) != nBefore {
+		t.Fatalf("stale syncDoc sent didChange: got %d, want %d", len(srv.didChangeRaw), nBefore)
+	}
+	for _, raw := range srv.didChangeRaw {
+		if strings.Contains(string(raw), "stale-marker-aaa") {
+			t.Fatalf("server got stale didChange: %s", raw)
+		}
+	}
+	cl.mu.RLock()
+	recorded := cl.openedText[uri]
+	cl.mu.RUnlock()
+	if !strings.Contains(recorded, "fresh-marker-bbb") {
+		t.Fatalf("client recorded stale text: %q", recorded)
+	}
+}
+
+// TestCallRespectsContextDuringFlush pins the call() flush path: when the
+// server stops reading its stdin and the pipe fills, call() must return the
+// context error at the deadline instead of blocking in the flush forever.
+func TestCallRespectsContextDuringFlush(t *testing.T) {
+	cl := newLSPClient(lspServerDef{Name: "fake", Cmd: []string{"fake"}}, t.TempDir())
+	_, toServerW := io.Pipe() // read end never drained: the flush blocks
+	toClientR, toClientW := io.Pipe()
+	cl.in, cl.out = toServerW, bufio.NewReader(toClientR)
+	cl.beginWriteLoop()
+	go cl.readLoop()
+	t.Cleanup(func() {
+		toServerW.Close()
+		toClientW.Close()
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	err := cl.call(ctx, "test/blockedFlush", map[string]any{}, nil)
+	elapsed := time.Since(start)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("call returned %v, want context.DeadlineExceeded", err)
+	}
+	if elapsed > 5*time.Second {
+		t.Fatalf("call blocked for %v, want it to respect the 500ms context", elapsed)
+	}
+	cl.mu.RLock()
+	n := len(cl.pending)
+	cl.mu.RUnlock()
+	if n != 0 {
+		t.Fatalf("pending holds %d entries after ctx timeout: leaked", n)
 	}
 }

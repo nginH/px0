@@ -42,13 +42,13 @@ import (
 
 var lspBenchLines = map[string]string{
 	"ascii": "func main() { fmt.Println(\"hello, world\") } // trailing comment here",
-	"latin": "h\u00e9llo \u2192 w\u00f6rld: na\u00efve caf\u00e9 r\u00e9sum\u00e9",
-	"cjk":   "func \u4f60\u597d\u4e16\u754c() { fmt.Println(\"\u65e5\u672c\u8a9e\u30c6\u30b9\u30c8\") } // \u30b3\u30e1\u30f3\u30c8",
-	"emoji": "\U0001F389\U0001F680\u2728 " + strings.Repeat("x\U0001F389", 40),
+	"latin": "héllo → wörld: naïve café résumé",
+	"cjk":   "func 你好世界() { fmt.Println(\"日本語テスト\") } // コメント",
+	"emoji": "🎉🚀✨ " + strings.Repeat("x🎉", 40),
 }
 
 // lspBenchLongLine is a ~12KB mixed-encoding line for scaling measurements.
-var lspBenchLongLine = strings.Repeat("h\u00e9llo \u2192 w\u00f6rld \U0001F389 x = 42; ", 500)
+var lspBenchLongLine = strings.Repeat("héllo → wörld 🎉 x = 42; ", 500)
 
 func BenchmarkLSPToLSP(b *testing.B) {
 	for name, line := range lspBenchLines {
@@ -273,5 +273,19 @@ func BenchmarkLSPBinDirs(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_ = lspBinDirs()
+	}
+}
+
+func BenchmarkLSPServerStatusBinDirs(b *testing.B) {
+	// ServerStatus re-resolves install state on every call: uncached
+	// lspBinDirs() before the fix (env walk + npm probe + PATH scans),
+	// memoized cachedBinDirs() after. This benchmark measures the
+	// optimization; BenchmarkLSPBinDirs above is the uncached control.
+	m := newLSPManager(b.TempDir(), false)
+	def := &lspServerDef{Name: "bench", Cmd: []string{"go"}, Exts: []string{".go"}}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = m.ServerStatus(def)
 	}
 }
