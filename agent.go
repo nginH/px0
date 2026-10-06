@@ -1,8 +1,6 @@
 package main
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,13 +8,14 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/px0-ai/harness"
 )
 
 // Editing through a coding harness. px0 never authors a change itself: it
@@ -25,300 +24,15 @@ import (
 // harness exits. The harness edits; px0 stays the reader that knows exactly
 // when to look again.
 //
-// Harnesses are discovered the same way language servers are, and the one to
-// use is chosen in the UI. Discovery alone never enables editing: running a
-// general-purpose agent over a workspace is a decision the user makes once,
-// and it is remembered in the settings file rather than a flag.
+// Harnesses are discovered and executed using github.com/px0-ai/harness.
+// Discovery alone never enables editing: running a general-purpose agent
+// over a workspace is a decision the user makes once, and it is remembered
+// in the settings file rather than a flag.
 
 const (
-	agentTimeout  = 10 * time.Minute
-	agentLogBytes = 32 << 10
+	agentTimeout  = harness.DefaultTimeout
+	agentLogBytes = harness.DefaultLogBytes
 )
-
-// agentPreset is a harness px0 knows and the argv that runs it headless. Each
-// of these starts an interactive session by default and would sit forever
-// waiting for approval, so every preset carries the flag that turns that off
-// and the one that lets it apply edits without asking.
-type agentPreset struct {
-	Name         string
-	Args         []string
-	ModelFlag    string
-	DefaultModel string
-	Models       []string
-}
-
-var agentPresets = []agentPreset{
-	{
-		Name:         "claude",
-		Args:         []string{"claude", "--permission-mode", "acceptEdits", "-p", "{prompt}"},
-		ModelFlag:    "--model",
-		DefaultModel: "haiku",
-		Models:       []string{"haiku", "sonnet", "opus"},
-	},
-	{
-		Name:         "gemini",
-		Args:         []string{"gemini", "--approval-mode", "auto_edit", "-p", "{prompt}"},
-		ModelFlag:    "-m",
-		DefaultModel: "gemini-2.5-flash-lite",
-		Models:       []string{"gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-2.5-pro"},
-	},
-	{
-		Name:         "cursor-agent",
-		Args:         []string{"cursor-agent", "--force", "-p", "{prompt}"},
-		ModelFlag:    "--model",
-		DefaultModel: "gemini-3.6-flash-minimal",
-		Models: []string{
-			"gemini-3.6-flash-minimal",
-			"gemini-3.6-flash-low",
-			"gemini-3.7-flash-low",
-			"gemini-3.8-flash-low",
-			"gpt-5.4-nano-none",
-			"gpt-5.4-mini-none",
-			"claude-sonnet-5-low",
-			"claude-opus-4-8-thinking-low",
-		},
-	},
-	{
-		Name:         "agy",
-		Args:         []string{"agy", "--dangerously-skip-permissions", "--mode", "accept-edits", "-p", "{prompt}"},
-		ModelFlag:    "--model",
-		DefaultModel: "gemini-3.6-flash-low",
-		Models: []string{
-			"gemini-3.6-flash-low",
-			"gemini-3.6-flash-medium",
-			"gemini-3.6-flash-high",
-			"gemini-3.7-flash-low",
-			"gemini-3.7-flash-medium",
-			"gemini-3.7-flash-high",
-			"gemini-3.8-flash-low",
-			"gemini-3.8-flash-medium",
-			"gemini-3.8-flash-high",
-			"gemini-3.1-pro-low",
-			"gemini-3.1-pro-high",
-		},
-	},
-	{
-		Name:         "opencode",
-		Args:         []string{"opencode", "run", "{prompt}"},
-		ModelFlag:    "-m",
-		DefaultModel: "opencode/big-pickle",
-		Models: []string{
-			"opencode/big-pickle",
-			"opencode/gpt-5-nano",
-			"opencode/minimax-m2.5-free",
-			"opencode/trinity-large-preview-free",
-			"github-copilot/claude-haiku-4.5",
-			"github-copilot/claude-sonnet-4.5",
-			"github-copilot/claude-opus-4.5",
-			"google/gemini-2.5-flash",
-			"google/gemini-2.5-pro",
-		},
-	},
-	{
-		Name:         "codex",
-		Args:         []string{"codex", "exec", "--ask-for-approval", "never", "{prompt}"},
-		ModelFlag:    "-m",
-		DefaultModel: "gpt-5-codex",
-		Models: []string{
-			"gpt-5-codex",
-			"gpt-5-mini",
-			"gpt-5.1-codex",
-			"gpt-5.1-codex-max",
-			"gpt-5.1-codex-mini",
-			"gpt-5.2-codex",
-			"gpt-4.1",
-			"o3-mini",
-			"o1",
-		},
-	},
-	{
-		Name:         "aider",
-		Args:         []string{"aider", "--yes-always", "--no-auto-commits", "--message", "{prompt}"},
-		ModelFlag:    "--model",
-		DefaultModel: "claude-3-7-sonnet",
-		Models: []string{
-			"claude-3-7-sonnet",
-			"claude-3-5-haiku",
-			"claude-3-opus",
-			"gpt-4o",
-			"gpt-4o-mini",
-			"o3-mini",
-			"gemini/gemini-2.5-flash",
-			"deepseek/deepseek-chat",
-			"ollama/qwen2.5-coder",
-		},
-	},
-	{
-		Name:         "goose",
-		Args:         []string{"goose", "run", "--no-session", "-t", "{prompt}"},
-		ModelFlag:    "--model",
-		DefaultModel: "gpt-4o",
-		Models: []string{
-			"gpt-4o",
-			"gpt-4o-mini",
-			"claude-3-5-sonnet",
-			"claude-3-5-haiku",
-			"gemini-2.5-flash",
-		},
-	},
-}
-
-var (
-	discoveredModelsMu sync.Mutex
-	discoveredModels   = map[string][]string{}
-	discoveringModels  = map[string]bool{}
-)
-
-func discoverHarnessModels(name, bin string, staticModels []string) []string {
-	discoveredModelsMu.Lock()
-	if cached, ok := discoveredModels[name]; ok {
-		discoveredModelsMu.Unlock()
-		return cached
-	}
-	isDiscovering := discoveringModels[name]
-	if !isDiscovering && bin != "" {
-		discoveringModels[name] = true
-		go runModelDiscovery(name, bin, staticModels)
-	}
-	discoveredModelsMu.Unlock()
-
-	return staticModels
-}
-
-func runModelDiscovery(name, bin string, staticModels []string) {
-	models := append([]string(nil), staticModels...)
-	switch name {
-	case "agy":
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		out, err := exec.CommandContext(ctx, bin, "models").Output()
-		cancel()
-		if err == nil {
-			var list []string
-			scanner := bufio.NewScanner(bytes.NewReader(out))
-			for scanner.Scan() {
-				line := strings.TrimSpace(scanner.Text())
-				if strings.HasPrefix(line, "Fetching") || line == "" {
-					continue
-				}
-				parts := strings.Fields(line)
-				if len(parts) > 0 && !strings.Contains(parts[0], " ") {
-					list = append(list, parts[0])
-				}
-			}
-			if len(list) > 0 {
-				def := "gemini-3.6-flash-low"
-				reordered := []string{def}
-				for _, m := range list {
-					if m != def {
-						reordered = append(reordered, m)
-					}
-				}
-				models = reordered
-			}
-		}
-	case "cursor-agent":
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		out, err := exec.CommandContext(ctx, bin, "--list-models").Output()
-		cancel()
-		if err == nil {
-			var list []string
-			scanner := bufio.NewScanner(bytes.NewReader(out))
-			for scanner.Scan() {
-				line := strings.TrimSpace(scanner.Text())
-				if line == "" || strings.HasPrefix(line, "Tip:") {
-					continue
-				}
-				parts := strings.SplitN(line, " - ", 2)
-				if len(parts) > 0 {
-					id := strings.TrimSpace(parts[0])
-					if id != "" && !strings.Contains(id, " ") {
-						list = append(list, id)
-					}
-				}
-			}
-			if len(list) > 0 {
-				def := "gemini-3.6-flash-minimal"
-				reordered := []string{def}
-				for _, m := range list {
-					if m != def {
-						reordered = append(reordered, m)
-					}
-				}
-				models = reordered
-			}
-		}
-	case "claude":
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		cmd := exec.CommandContext(ctx, bin, "-p", "/model")
-		cmd.Stdin = strings.NewReader("")
-		out, err := cmd.Output()
-		cancel()
-		if err == nil {
-			var list []string
-			text := string(out)
-			if idx := strings.Index(text, "Available:"); idx != -1 {
-				avail := text[idx+len("Available:"):]
-				if dot := strings.IndexByte(avail, '.'); dot != -1 {
-					avail = avail[:dot]
-				}
-				for _, part := range strings.Split(avail, ",") {
-					m := strings.TrimSpace(part)
-					m = strings.TrimPrefix(m, "or ")
-					if m != "" && !strings.Contains(m, " ") {
-						list = append(list, m)
-					}
-				}
-			}
-			if len(list) > 0 {
-				def := "haiku"
-				reordered := []string{}
-				hasDef := false
-				for _, m := range list {
-					if m == def {
-						hasDef = true
-					} else {
-						reordered = append(reordered, m)
-					}
-				}
-				if hasDef {
-					models = append([]string{def}, reordered...)
-				} else {
-					models = list
-				}
-			}
-		}
-	case "opencode":
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		out, err := exec.CommandContext(ctx, bin, "models").Output()
-		cancel()
-		if err == nil {
-			var list []string
-			scanner := bufio.NewScanner(bytes.NewReader(out))
-			for scanner.Scan() {
-				line := strings.TrimSpace(scanner.Text())
-				if line == "" || strings.Contains(line, " ") {
-					continue
-				}
-				list = append(list, line)
-			}
-			if len(list) > 0 {
-				def := "opencode/big-pickle"
-				reordered := []string{def}
-				for _, m := range list {
-					if m != def {
-						reordered = append(reordered, m)
-					}
-				}
-				models = reordered
-			}
-		}
-	}
-
-	discoveredModelsMu.Lock()
-	discoveredModels[name] = models
-	discoveringModels[name] = false
-	discoveredModelsMu.Unlock()
-}
 
 // agentHarness is one row of the picker.
 type agentHarness struct {
@@ -490,78 +204,18 @@ func newAgentManager(root, flagSpec string, lsp *lspManager) (*agentManager, err
 // resolveAgentSpec turns a preset name or a command template into argv, and
 // verifies the binary exists now rather than at first use.
 func resolveAgentSpec(spec, model string) (string, []string, string, error) {
-	spec = strings.TrimSpace(spec)
-	if spec == "" {
-		return "", nil, "", errors.New("empty harness")
+	cmd, err := harness.Resolve(spec, model)
+	if err != nil {
+		return "", nil, "", err
 	}
-
-	var name string
-	var args []string
-	var chosenModel string
-	for _, p := range agentPresets {
-		if strings.EqualFold(spec, p.Name) {
-			name = p.Name
-			chosenModel = model
-			if chosenModel == "" {
-				chosenModel = p.DefaultModel
-			}
-			promptIdx := -1
-			for i, arg := range p.Args {
-				if arg == "{prompt}" {
-					promptIdx = i
-					break
-				}
-			}
-			args = make([]string, 0, len(p.Args)+2)
-			insertIdx := promptIdx
-			if promptIdx > 0 && strings.HasPrefix(p.Args[promptIdx-1], "-") {
-				insertIdx = promptIdx - 1
-			}
-			for i, arg := range p.Args {
-				if i == insertIdx && p.ModelFlag != "" && chosenModel != "" {
-					args = append(args, p.ModelFlag, chosenModel)
-				}
-				args = append(args, arg)
-			}
-			break
-		}
-	}
-	if args == nil {
-		args = strings.Fields(spec)
-		if len(args) == 0 {
-			return "", nil, "", errors.New("empty harness command")
-		}
-		if !strings.Contains(spec, "{prompt}") {
-			return "", nil, "", fmt.Errorf("a command template must contain {prompt} (known harnesses: %s)",
-				strings.Join(agentPresetNames(), ", "))
-		}
-		name = filepath.Base(args[0])
-		chosenModel = model
-		if chosenModel != "" {
-			for i, arg := range args {
-				args[i] = strings.ReplaceAll(arg, "{model}", chosenModel)
-			}
-		}
-	}
-
-	bin, ok := lookPathIn(args[0], lspBinDirs())
-	if !ok {
-		return "", nil, "", fmt.Errorf("%s is not installed", args[0])
-	}
-	resolved := append([]string(nil), args...)
-	resolved[0] = bin
-	return name, resolved, chosenModel, nil
+	return cmd.Name, cmd.Args, cmd.Model, nil
 }
 
 func agentPresetNames() []string {
-	names := make([]string, len(agentPresets))
-	for i, p := range agentPresets {
-		names[i] = p.Name
-	}
-	return names
+	return harness.PresetNames()
 }
 
-// Detect reports every harness px0 knows and whether it is installed right
+// Detect reports every harness known and whether it is installed right
 // now, so a tool installed since startup shows up without a restart.
 func (m *agentManager) Detect() []agentHarness {
 	m.mu.Lock()
@@ -571,29 +225,27 @@ func (m *agentManager) Detect() []agentHarness {
 	}
 	m.mu.Unlock()
 
-	out := make([]agentHarness, 0, len(agentPresets))
-	for _, p := range agentPresets {
-		bin, ok := lookPathIn(p.Args[0], lspBinDirs())
-		models := discoverHarnessModels(p.Name, bin, p.Models)
-		curModel := savedModels[p.Name]
-		if curModel == "" {
-			curModel = p.DefaultModel
+	detected := harness.Detect(savedModels)
+	out := make([]agentHarness, 0, len(detected))
+	for _, h := range detected {
+		var models []string
+		if h.Installed {
+			if list, err := harness.DiscoverModels(context.Background(), h.Name); err == nil {
+				models = list
+			}
 		}
-
-		cmdStr := strings.Join(p.Args, " ")
-		if _, args, _, err := resolveAgentSpec(p.Name, curModel); err == nil {
-			cmdStr = strings.Join(args, " ")
+		curModel := h.Model
+		if curModel == "" && len(models) > 0 {
+			curModel = models[0]
 		}
-
-		h := agentHarness{
-			Name:      p.Name,
-			Cmd:       cmdStr,
-			Installed: ok,
-			Path:      bin,
+		out = append(out, agentHarness{
+			Name:      h.Name,
+			Cmd:       h.Cmd,
+			Installed: h.Installed,
+			Path:      h.Path,
 			Models:    models,
 			Model:     curModel,
-		}
-		out = append(out, h)
+		})
 	}
 	return out
 }
@@ -1002,33 +654,19 @@ func (m *agentManager) run(ctx context.Context, cancel context.CancelFunc, job *
 
 	before := worktreeSnapshot(m.root)
 
-	args := make([]string, len(template))
-	for i, tok := range template {
-		args[i] = strings.ReplaceAll(tok, "{prompt}", prompt)
-	}
-
 	stdoutStreamer := newLineStreamer(job.out, uiFaint("│", os.Stdout), os.Stdout)
 	stderrStreamer := newLineStreamer(job.stderr, uiDim("│", os.Stdout), os.Stdout)
 
-	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
-	cmd.Dir = m.root
-	cmd.Stdout = stdoutStreamer
-	cmd.Stderr = stderrStreamer
-	cmd.WaitDelay = 2 * time.Second
-	setProcessGroup(cmd)
-	// stdin stays empty: a harness that still wants to ask something fails
-	// fast instead of hanging until the timeout with nothing on screen.
-
-	err := cmd.Run()
+	res := harness.Run(ctx, harness.Command{Name: job.Harness, Args: template}, prompt, harness.Options{
+		Dir:      m.root,
+		Timeout:  agentTimeout,
+		LogBytes: agentLogBytes,
+		Stdout:   stdoutStreamer,
+		Stderr:   stderrStreamer,
+	})
 	stdoutStreamer.Flush()
 	stderrStreamer.Flush()
-	if ctx.Err() != nil {
-		if errors.Is(ctx.Err(), context.Canceled) {
-			err = errors.New("cancelled")
-		} else {
-			err = fmt.Errorf("gave up after %s", agentTimeout)
-		}
-	}
+	err := res.Err
 
 	changed := changedSince(m.root, before)
 	m.settle(changed)
@@ -1036,7 +674,7 @@ func (m *agentManager) run(ctx context.Context, cancel context.CancelFunc, job *
 	m.mu.Lock()
 	job.Running = false
 	job.Changed = changed
-	job.Ms = time.Since(job.start).Milliseconds()
+	job.Ms = res.Duration.Milliseconds()
 	if err != nil {
 		job.Error = err.Error()
 	}

@@ -17,6 +17,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/px0-ai/harness"
 )
 
 // Threads are long-running, multi-turn conversations with a coding harness,
@@ -585,10 +587,6 @@ func (tm *threadManager) runTurn(ctx context.Context, cancel context.CancelFunc,
 	if native {
 		argv = threadArgv(r.name, r.base, sessionID, live)
 	}
-	args := make([]string, len(argv))
-	for i, tok := range argv {
-		args[i] = strings.ReplaceAll(tok, "{prompt}", prompt)
-	}
 
 	if uiVerbose {
 		uiVerbosePrompt(0, r.name, prompt, os.Stdout)
@@ -599,24 +597,15 @@ func (tm *threadManager) runTurn(ctx context.Context, cancel context.CancelFunc,
 	stderr := &tailBuffer{max: agentLogBytes}
 	sink := &threadSink{tm: tm, tid: r.tid, turn: r.turn, harness: r.name}
 
-	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
-	cmd.Dir = tm.root
-	cmd.Stdout = sink
-	cmd.Stderr = stderr
-	cmd.WaitDelay = 2 * time.Second
-	setProcessGroup(cmd)
-	// stdin stays empty for the same reason as an inline edit: a harness that
-	// wants to ask something should fail fast, not hang.
-
-	err := cmd.Run()
+	res := harness.Run(ctx, harness.Command{Name: r.name, Args: argv, Model: r.model}, prompt, harness.Options{
+		Dir:      tm.root,
+		Timeout:  threadTurnTimeout,
+		LogBytes: agentLogBytes,
+		Stdout:   sink,
+		Stderr:   stderr,
+	})
 	sink.flush()
-	if ctx.Err() != nil {
-		if errors.Is(ctx.Err(), context.Canceled) {
-			err = errors.New("cancelled")
-		} else {
-			err = fmt.Errorf("gave up after %s", threadTurnTimeout)
-		}
-	}
+	err := res.Err
 	if err == nil && sink.failure != "" {
 		err = errors.New(sink.failure)
 	}
