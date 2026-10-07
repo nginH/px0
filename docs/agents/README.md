@@ -39,8 +39,9 @@ Whenever modifying, adding, or refactoring code in this repository, you must aud
 
 ## 3. Checklist for Agents Prior to Submitting Work
 
-- Verification: Ran `go test ./...` and confirmed all unit/regression tests pass (`ok px0`).
-- Build Integrity: Verified successful build with `go build -o px0 .`.
+- Fast Inner Loop: Run `make check` or `go test -short .` for fast iteration (~10s).
+- Full Verification: Ran `make test` or `go test .` and confirmed all unit/regression tests pass (`ok px0`).
+- Build Integrity: Verified successful build with `make build` (or `go build -o px0 .`).
 - Architecture Sync: Any new optimization, algorithmic adjustment, or structural change is documented in the corresponding [`docs/internals/`](../internals/README.md) write-up.
 - Flag & Shortcut Sync: Any new keyboard shortcut, UI behavior, or CLI flag is reflected in [`README.md`](../../README.md).
 - Benchmark Alignment: If search, highlight, or index performance characteristics change, verify whether [`BENCHMARKS.md`](../../BENCHMARKS.md) requires updated notes or numbers.
@@ -80,7 +81,7 @@ To quickly locate and modify UI features, refer to this structured section index
 | `<div id="sel-menu">`        | Right-click menu on a selection, offering Copy Ref, Copy with Context, Edit Inline, and Find Usages.                                                                                                                                                                                |
 | `<div id="toast">`           | Floating bottom notification toast confirming actions.                                                                                                                                                                                                                               |
 | `<div id="metrics-menu">`    | Process metrics modal opened from CPU/RAM in the status bar.                                                                                                                                                                                                                          |
-| `<footer id="status">`       | Bottom status bar: language, lines, size, cursor pos, and LSP status. While code is selected, `#footer-sel` (Copy Ref, Copy with Context, Edit Inline) replaces the left-side buttons and selection stats appear on the right. Never wraps: `fitStatus()` in `status.js` adds cumulative `fit-1`..`fit-6` classes to hide detail as width runs out. |
+| `<footer id="status">`       | Bottom status bar: language, lines, size, cursor pos, and LSP status. While code is selected, `#footer-sel` (Copy Ref, Copy with Context, Edit Inline) replaces the left-side buttons and selection stats appear on the right. Never wraps: `fitStatus()` in `status.js` adds cumulative `fit-1`..`fit-6` classes to hide detail as width runs out, and restores a step only with 16px to spare so resizing near a threshold does not flicker. |
 | `<div id="overlay">`         | Modal overlay hosting Quick Open and Command Palette (`#palette`).                                                                                                                                                                                                                   |
 | `<div id="helpsheet">`       | Keyboard shortcuts cheat-sheet modal overlay.                                                                                                                                                                                                                                        |
 

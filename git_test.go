@@ -27,6 +27,9 @@ func gitInstalled() bool {
 // rename) so every status code is exercised. Returns the served root.
 func gitRepo(tb testing.TB) string {
 	tb.Helper()
+	if testing.Short() {
+		tb.Skip("skipping git integration test in short mode")
+	}
 	root := tb.TempDir()
 	// macOS TempDir lives under /var -> /private/var; git reports the real path.
 	if r, err := filepath.EvalSymlinks(root); err == nil {
@@ -173,6 +176,9 @@ func TestGitDiff(t *testing.T) {
 }
 
 func TestGitCleanRepo(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
 	if !gitInstalled() {
 		t.Skip("git not installed")
 	}
@@ -247,6 +253,9 @@ func TestGitDisabled(t *testing.T) {
 }
 
 func TestGitGutter(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
 	if !gitInstalled() {
 		t.Skip("git not installed")
 	}
@@ -909,6 +918,9 @@ func TestGitStageUnstageCommit(t *testing.T) {
 // more than one working tree.
 func gitTestRun(tb testing.TB, dir string, args ...string) string {
 	tb.Helper()
+	if testing.Short() {
+		tb.Skip("skipping git integration test in short mode")
+	}
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
