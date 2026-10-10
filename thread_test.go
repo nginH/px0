@@ -351,3 +351,54 @@ func TestThreadPromptCarriesPRScope(t *testing.T) {
 		t.Error("no PR, no PR context")
 	}
 }
+
+func TestThreadDeleteAPI(t *testing.T) {
+	root := t.TempDir()
+	os.WriteFile(filepath.Join(root, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0o644)
+	h := writeHarness(t, `printf 'ok\n'`)
+	s := agentServer(t, root, h)
+
+	// Create thread 1 and delete via query parameter
+	code, m1 := agentPostJSON(t, s, "/api/threads/create", map[string]any{"path": "main.go", "l1": 1, "l2": 1, "message": "thread 1"})
+	if code != 200 {
+		t.Fatalf("create 1 = %d", code)
+	}
+	id1 := m1["id"].(string)
+	waitThreadIdle(t, s, id1)
+
+	code, delResp1 := agentPost(t, s, "/api/threads/delete?id="+id1)
+	if code != 200 || delResp1["deleted"] != true {
+		t.Fatalf("delete via query = %d, resp: %v", code, delResp1)
+	}
+	if s.threads.Get(id1) != nil {
+		t.Fatalf("thread 1 should be gone after delete")
+	}
+
+	// Create thread 2 and delete via JSON body
+	code, m2 := agentPostJSON(t, s, "/api/threads/create", map[string]any{"path": "main.go", "l1": 1, "l2": 1, "message": "thread 2"})
+	if code != 200 {
+		t.Fatalf("create 2 = %d", code)
+	}
+	id2 := m2["id"].(string)
+	waitThreadIdle(t, s, id2)
+
+	code, delResp2 := agentPostJSON(t, s, "/api/threads/delete", map[string]any{"id": id2})
+	if code != 200 || delResp2["deleted"] != true {
+		t.Fatalf("delete via json body = %d, resp: %v", code, delResp2)
+	}
+	if s.threads.Get(id2) != nil {
+		t.Fatalf("thread 2 should be gone after delete")
+	}
+
+	// Deleting nonexistent thread returns 200 with deleted: false
+	code, delResp3 := agentPostJSON(t, s, "/api/threads/delete", map[string]any{"id": "nonexistent"})
+	if code != 200 || delResp3["deleted"] != false {
+		t.Fatalf("delete nonexistent = %d, resp: %v", code, delResp3)
+	}
+
+	// Missing id returns 400
+	code, _ = agentPost(t, s, "/api/threads/delete")
+	if code != 400 {
+		t.Fatalf("delete without id = %d, want 400", code)
+	}
+}

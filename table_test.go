@@ -20,6 +20,7 @@ func mustTable(t *testing.T, src string, delim rune) tableResult {
 }
 
 func TestTableQuotedCellWithCommaAndNewlineStaysOneCellAndLinesSkip(t *testing.T) {
+	t.Parallel()
 	res := mustTable(t, "repo,note\nchromium,\"monorepo,\ndepot_tools excluded\"\nvscode,warm\n", ',')
 	if got := res.Rows[0].Cells[1]; got != "monorepo,\ndepot_tools excluded" {
 		t.Errorf("quoted cell = %q", got)
@@ -30,6 +31,7 @@ func TestTableQuotedCellWithCommaAndNewlineStaysOneCellAndLinesSkip(t *testing.T
 }
 
 func TestTableRaggedRowsKeepTheirCellsAndWidenTheTable(t *testing.T) {
+	t.Parallel()
 	res := mustTable(t, "a,b,c\n1\n1,2,3,4\n", ',')
 	if len(res.Rows[0].Cells) != 1 || len(res.Rows[1].Cells) != 4 {
 		t.Errorf("rows = %v", res.Rows)
@@ -40,6 +42,7 @@ func TestTableRaggedRowsKeepTheirCellsAndWidenTheTable(t *testing.T) {
 }
 
 func TestTableTSVSplitsOnTabsOnly(t *testing.T) {
+	t.Parallel()
 	res := mustTable(t, "name\tcity\nDoe, Jane\tLeeds\n", '\t')
 	if want := []string{"Doe, Jane", "Leeds"}; !reflect.DeepEqual(res.Rows[0].Cells, want) {
 		t.Errorf("cells = %q, want %q", res.Rows[0].Cells, want)
@@ -47,6 +50,7 @@ func TestTableTSVSplitsOnTabsOnly(t *testing.T) {
 }
 
 func TestTableStripsByteOrderMarkFromHeader(t *testing.T) {
+	t.Parallel()
 	res := mustTable(t, "\ufeffid,name\n1,x\n", ',')
 	if res.Header[0] != "id" {
 		t.Errorf("header[0] = %q", res.Header[0])
@@ -54,6 +58,7 @@ func TestTableStripsByteOrderMarkFromHeader(t *testing.T) {
 }
 
 func TestTableBlankLinesAreSkippedButLineNumbersStayTrue(t *testing.T) {
+	t.Parallel()
 	res := mustTable(t, "a,b\n\n1,2\n\n\n3,4\n", ',')
 	if len(res.Rows) != 2 || res.Rows[0].Line != 3 || res.Rows[1].Line != 6 {
 		t.Errorf("rows = %+v", res.Rows)
@@ -61,6 +66,7 @@ func TestTableBlankLinesAreSkippedButLineNumbersStayTrue(t *testing.T) {
 }
 
 func TestTableStrayQuotesDoNotFailTheFile(t *testing.T) {
+	t.Parallel()
 	res := mustTable(t, "a,b\n5\" pipe,x\n", ',')
 	if res.Rows[0].Cells[0] != "5\" pipe" {
 		t.Errorf("cell = %q", res.Rows[0].Cells[0])
@@ -68,6 +74,7 @@ func TestTableStrayQuotesDoNotFailTheFile(t *testing.T) {
 }
 
 func TestTableEmptyFileHasNoColumns(t *testing.T) {
+	t.Parallel()
 	res := mustTable(t, "", ',')
 	if res.Cols != 0 || len(res.Rows) != 0 || res.Truncated {
 		t.Errorf("res = %+v", res)
@@ -75,6 +82,7 @@ func TestTableEmptyFileHasNoColumns(t *testing.T) {
 }
 
 func TestTableStopsAtRowCap(t *testing.T) {
+	t.Parallel()
 	var b strings.Builder
 	b.WriteString("n,sq\n")
 	for i := 1; i <= maxTableRows+1000; i++ {
@@ -90,6 +98,7 @@ func TestTableStopsAtRowCap(t *testing.T) {
 }
 
 func TestTableExactlyAtRowCapIsNotTruncated(t *testing.T) {
+	t.Parallel()
 	var b strings.Builder
 	b.WriteString("n\n")
 	for i := 1; i <= maxTableRows; i++ {
@@ -108,6 +117,7 @@ func writeFile(t *testing.T, root, rel, body string) {
 }
 
 func TestTableEndpointServesRowsAndFileFlagsTables(t *testing.T) {
+	t.Parallel()
 	s, root := newTestServer(t)
 	writeFile(t, root, "bench.csv", "repo,files\nlinux,81902\n")
 	writeFile(t, root, "bench.tsv", "repo\tfiles\nlinux\t81902\n")
@@ -149,6 +159,7 @@ func (s *rowSource) Read(p []byte) (int, error) {
 }
 
 func TestTableReadsNoMoreThanTheByteCap(t *testing.T) {
+	t.Parallel()
 	src := &rowSource{row: strings.Repeat("y", 10000) + ",end\n"}
 	res, err := renderTable(io.MultiReader(strings.NewReader("a,b\n"), src), 50<<20, ',')
 	if err != nil {
@@ -168,6 +179,7 @@ func TestTableReadsNoMoreThanTheByteCap(t *testing.T) {
 }
 
 func TestTableFileAtTheByteCapIsNotTruncated(t *testing.T) {
+	t.Parallel()
 	src := "a,b\n1,2\n"
 	res, err := renderTable(strings.NewReader(src), maxTableBytes, ',')
 	if err != nil || res.Truncated {
@@ -176,6 +188,7 @@ func TestTableFileAtTheByteCapIsNotTruncated(t *testing.T) {
 }
 
 func TestTableDelimiterComesFromTheFileNotTheExtension(t *testing.T) {
+	t.Parallel()
 	for name, tc := range map[string]struct {
 		src      string
 		fallback rune
@@ -200,6 +213,7 @@ func TestTableDelimiterComesFromTheFileNotTheExtension(t *testing.T) {
 }
 
 func TestTableTieBetweenSeparatorsKeepsTheExtension(t *testing.T) {
+	t.Parallel()
 	if got := sniffDelim([]byte("a,b\tc\n"), '\t'); got != '\t' {
 		t.Errorf("tie picked %q, want the .tsv tab", got)
 	}

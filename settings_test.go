@@ -16,8 +16,8 @@ func TestSettingsDefaults(t *testing.T) {
 	if m["editor.fontSize"] != 13.5 {
 		t.Errorf("expected editor.fontSize 13.5, got %v", m["editor.fontSize"])
 	}
-	if m["workbench.colorTheme"] != "github-dark" {
-		t.Errorf("expected workbench.colorTheme github-dark, got %v", m["workbench.colorTheme"])
+	if m["workbench.colorTheme"] != "catppuccin-mocha" {
+		t.Errorf("expected workbench.colorTheme catppuccin-mocha, got %v", m["workbench.colorTheme"])
 	}
 	if m["editor.wordWrap"] != "on" {
 		t.Errorf("expected editor.wordWrap on, got %v", m["editor.wordWrap"])

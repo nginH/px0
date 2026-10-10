@@ -4,6 +4,7 @@ go 1.25
 
 require (
 	github.com/alecthomas/chroma/v2 v2.27.0
+	github.com/px0-ai/harness v0.0.1
 	github.com/yuin/goldmark v1.8.6
 )
 

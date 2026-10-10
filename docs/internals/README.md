@@ -1,6 +1,6 @@
 # px0 Internal Architecture & Design Documentation
 
-Welcome to the internal engineering documentation for px0, an ultra-lightweight, zero-config code reader and navigator that delegates edits to the user's coding agent, packaged as a single statically-linked binary (~9.5 MB).
+Welcome to the internal engineering documentation for px0, an ultra-lightweight, zero-config code reader and navigator that delegates edits to the user's coding agent, packaged as a single statically-linked binary (~3.5 MB).
 
 This directory contains in-depth technical write-ups explaining how px0 achieves sub-millisecond startup, instantaneous file navigation, deep code intelligence, and a minimal memory footprint (~20–30 MB RSS) across codebases containing tens of thousands of files.
 

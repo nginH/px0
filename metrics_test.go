@@ -33,9 +33,9 @@ func TestMetricsCollection(t *testing.T) {
 	}
 
 	// 4. Test CPU sampler over a small delay
-	usage := globalMetrics.sampleCPU()
+	usage := globalMetrics.SampleCPU()
 	time.Sleep(210 * time.Millisecond)
-	usage2 := globalMetrics.sampleCPU()
+	usage2 := globalMetrics.SampleCPU()
 	if usage < 0 || usage2 < 0 {
 		t.Errorf("CPU usage should be non-negative, got %f and %f", usage, usage2)
 	}

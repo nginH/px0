@@ -159,10 +159,10 @@ var settingsSchema = []settingSchemaItem{
 		Description: "Specifies the color theme used in the workbench.",
 		Category:    "Workbench",
 		Type:        "select",
-		Default:     "github-dark",
+		Default:     "catppuccin-mocha",
 		Options: []string{
-			"github-dark", "dark", "light",
 			"catppuccin-mocha", "catppuccin-latte",
+			"github-dark", "dark", "light",
 			"dracula", "gruvbox-dark", "gruvbox-light",
 			"monokai", "nord", "one-dark", "rose-pine",
 			"solarized-dark", "solarized-light",

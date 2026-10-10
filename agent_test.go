@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -11,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/px0-ai/harness"
 )
 
 // writeHarness creates an executable stand-in for a coding harness, outside the
@@ -142,18 +145,33 @@ func TestAgentDetectListsKnownHarnesses(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := m.Detect()
-	if len(got) != len(agentPresets) {
-		t.Fatalf("detected %d rows, want one per preset (%d)", len(got), len(agentPresets))
+	presets := harness.Presets()
+	if len(got) != len(presets) {
+		t.Fatalf("detected %d rows, want one per preset (%d)", len(got), len(presets))
 	}
 	for i, h := range got {
-		if h.Name != agentPresets[i].Name {
-			t.Fatalf("row %d = %q, want %q", i, h.Name, agentPresets[i].Name)
+		if h.Name != presets[i].Name {
+			t.Fatalf("row %d = %q, want %q", i, h.Name, presets[i].Name)
 		}
 		if !strings.Contains(h.Cmd, "{prompt}") {
 			t.Fatalf("%s cmd should show the template, got %q", h.Name, h.Cmd)
 		}
 		if h.Installed && h.Path == "" {
 			t.Fatalf("%s reported installed with no path", h.Name)
+		}
+	}
+}
+
+func TestAgentDetectLazyModels(t *testing.T) {
+	isolateSettings(t)
+	m, err := newAgentManager(t.TempDir(), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := m.Detect()
+	for _, h := range got {
+		if len(h.Models) > 0 {
+			t.Fatalf("harness %q had models eagerly discovered when unselected", h.Name)
 		}
 	}
 }
@@ -379,21 +397,24 @@ func TestAgentModelSelectionAndDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	rows := m.Detect()
+	if len(rows) == 0 {
+		t.Fatal("expected detected rows")
+	}
 	for _, h := range rows {
-		if len(h.Models) == 0 {
-			t.Fatalf("%s should list models", h.Name)
+		if !h.Installed {
+			continue
 		}
-		if h.Model == "" {
-			t.Fatalf("%s should have a default model", h.Name)
+		if err := m.Select(h.Name, "custom-model"); err != nil {
+			t.Fatalf("select %s with model: %v", h.Name, err)
 		}
-		if h.Model != h.Models[0] {
-			t.Fatalf("%s default model %q != least capable model %q", h.Name, h.Model, h.Models[0])
+		if m.Model() != "custom-model" {
+			t.Fatalf("model = %q, want custom-model", m.Model())
 		}
 	}
 }
 
 func TestPresetArgvOrder(t *testing.T) {
-	for _, p := range agentPresets {
+	for _, p := range harness.Presets() {
 		n := len(p.Args)
 		if n < 2 {
 			t.Fatalf("preset %s args too short: %v", p.Name, p.Args)
@@ -402,7 +423,7 @@ func TestPresetArgvOrder(t *testing.T) {
 			t.Fatalf("preset %s args %v: want {prompt} at the very end", p.Name, p.Args)
 		}
 
-		// When resolved with default model, {prompt} must remain at the very end
+		// When resolved, {prompt} must remain at the very end
 		_, resolved, _, err := resolveAgentSpec(p.Name, "")
 		if err != nil {
 			continue // tool may not be installed in test env
@@ -421,25 +442,16 @@ func TestClaudeModelDiscovery(t *testing.T) {
 	if err := os.WriteFile(fakeClaude, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
 
-	discoveredModelsMu.Lock()
-	delete(discoveredModels, "claude")
-	delete(discoveringModels, "claude")
-	discoveredModelsMu.Unlock()
-
-	runModelDiscovery("claude", fakeClaude, []string{"haiku", "sonnet", "opus"})
-
-	discoveredModelsMu.Lock()
-	models := discoveredModels["claude"]
-	discoveredModelsMu.Unlock()
+	models, err := harness.DiscoverModels(context.Background(), "claude")
+	if err != nil {
+		t.Fatalf("DiscoverModels error: %v", err)
+	}
 
 	if len(models) == 0 {
 		t.Fatal("expected discovered models for claude, got none")
 	}
-	if models[0] != "haiku" {
-		t.Fatalf("expected least capable default 'haiku' at index 0, got %q", models[0])
-	}
-	// Check that fable, best, sonnet[1m] etc are parsed
 	foundFable := false
 	for _, m := range models {
 		if m == "fable" {
@@ -480,7 +492,7 @@ func TestAgentAllowsNonOverlappingEditsInParallel(t *testing.T) {
 		t.Skip("git not installed")
 	}
 	root := gitRepo(t)
-	s := agentServer(t, root, writeHarness(t, "sleep 1\n"))
+	s := agentServer(t, root, writeHarness(t, "sleep 0.15\n"))
 
 	code, first := agentPost(t, s, "/api/agent/edit?path=keep.go&l1=1&l2=1&instruction=one")
 	if code != 200 {
@@ -668,23 +680,23 @@ func TestShellQuoteAndCommand(t *testing.T) {
 func TestAllPresetArgvFormatting(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
-	for _, p := range agentPresets {
+	for _, p := range harness.Presets() {
 		binPath := filepath.Join(dir, p.Args[0])
 		if err := os.WriteFile(binPath, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	for _, p := range agentPresets {
-		name, resolved, model, err := resolveAgentSpec(p.Name, "")
+	for _, p := range harness.Presets() {
+		name, resolved, model, err := resolveAgentSpec(p.Name, "test-model")
 		if err != nil {
 			t.Fatalf("resolveAgentSpec(%q) error: %v", p.Name, err)
 		}
 		if name != p.Name {
 			t.Errorf("name = %q, want %q", name, p.Name)
 		}
-		if model != p.DefaultModel {
-			t.Errorf("model = %q, want %q", model, p.DefaultModel)
+		if model != "test-model" {
+			t.Errorf("model = %q, want %q", model, "test-model")
 		}
 		if resolved[len(resolved)-1] != "{prompt}" {
 			t.Errorf("%s final arg = %q, want {prompt}", p.Name, resolved[len(resolved)-1])
@@ -692,13 +704,13 @@ func TestAllPresetArgvFormatting(t *testing.T) {
 		// Ensure model flag was inserted properly
 		hasModel := false
 		for i, a := range resolved {
-			if a == p.ModelFlag && i+1 < len(resolved) && resolved[i+1] == p.DefaultModel {
+			if a == p.ModelFlag && i+1 < len(resolved) && resolved[i+1] == "test-model" {
 				hasModel = true
 				break
 			}
 		}
 		if !hasModel {
-			t.Errorf("%s resolved args %v missing model flag %q %q", p.Name, resolved, p.ModelFlag, p.DefaultModel)
+			t.Errorf("%s resolved args %v missing model flag %q %q", p.Name, resolved, p.ModelFlag, "test-model")
 		}
 	}
 }

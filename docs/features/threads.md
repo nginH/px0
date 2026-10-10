@@ -49,7 +49,7 @@ The default comes from where you started: the editor section a selection was mad
 
 The list shows every thread for the workspace, most recently active first, with its anchor, turn count and age. A spinner marks a thread that is working, and `!` marks one whose last reply failed. **This file** filters to threads started in the open file. The **Threads** tab shows a pulsing dot while any thread is working, so you can leave it and come back.
 
-Threads are stored on disk and survive restarts. A reply that was still running when px0 exited is marked as interrupted. Delete a thread with the trash button in its header.
+Threads are stored on disk and survive restarts. A reply that was still running when px0 exited is marked as interrupted. You can delete a thread using the trash button in its header, by hovering over it in the thread list and clicking its trash button (or pressing `Delete`/`Backspace` when focused), or by running **Threads: Delete Current Thread** from the command palette.
 
 ## Requirements
 

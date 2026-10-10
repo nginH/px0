@@ -16,6 +16,7 @@ import { SEL_KEYS, runSelectionAction, selectAll, clearSelectAll, copySelectAll,
 
 import { cycleTheme } from './theme.js';
 import { previewing, togglePreview, previewKey, selectPreview } from './markdown.js';
+import { exitMermaidFullscreen } from './mermaid.js';
 import { toggleDiff } from './diff.js';
 import { openSettings, closeSettings, isSettingsOpen } from './settings.js';
 import { handleVimKeyDown, isVimEnabled, getVimMode, showVimHelp, closeVimHelp } from './vim.js';
@@ -101,6 +102,7 @@ export function initShortcuts() {
     const mod = e[MOD];
 
     if (e.key === 'Escape') {
+      if (exitMermaidFullscreen()) return;
       const lb = $('#img-lightbox');
       if (lb && !lb.hidden) { lb.hidden = true; return; }
       if (!$('#vim-helpsheet')?.hidden) { closeVimHelp(); return; }

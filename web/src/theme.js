@@ -6,6 +6,7 @@
 import { showToast } from './ui.js';
 import { apiPostJson } from './state.js';
 import { DEFAULT_THEME, chooseThemePreference } from './theme-preference.js';
+import { emit } from './bus.js';
 
 const KEY = 'px0.theme';
 const THEME_SELECTOR = /^(?::root|html)?\[data-theme=["']?([\w-]+)["']?\]$/;
@@ -48,11 +49,13 @@ export const currentTheme = () => document.documentElement.dataset.theme;
 
 export function setTheme(id, persist = true) {
   if (!listThemes().some(t => t.id === id)) return false;
+  const changed = currentTheme() !== id;
   document.documentElement.dataset.theme = id;
   if (persist) {
     try { localStorage.setItem(KEY, id); } catch {}
     void apiPostJson('api/settings', { 'workbench.colorTheme': id }).catch(() => {});
   }
+  if (changed) emit('theme:changed', id);
   return true;
 }
 

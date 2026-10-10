@@ -134,6 +134,6 @@ export function groupHits(hits) {
 export function flashFind(q) {
   const d = doc_();
   if (!d || !q) return;
-  S.find = { q, ci: true, hits: [{ line: d.cur, n: 0 }], byLine: new Set([d.cur]), active: 0 };
+  S.find = { q, cs: false, hits: [{ line: d.cur, n: 0 }], byLine: new Set([d.cur]), active: 0 };
   setTimeout(paint, 0);
 }

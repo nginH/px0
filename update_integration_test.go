@@ -141,7 +141,7 @@ func TestInstallUpdate(t *testing.T) {
 
 // TestAutoUpdateFastPathSkipsNetwork verifies that when the cached state was
 // checked recently and shows no newer version, autoUpdate never touches the
-// network (and so never reaches the os.Executable()-based install/re-exec
+// network (and so never reaches the os.Executable()-based install
 // path, which would be unsafe to exercise against the test binary).
 func TestAutoUpdateFastPathSkipsNetwork(t *testing.T) {
 	tmpDir := t.TempDir()
@@ -157,7 +157,7 @@ func TestAutoUpdateFastPathSkipsNetwork(t *testing.T) {
 
 // TestAutoUpdateDueCheckSkipsInstallWhenUpToDate verifies that a due daily
 // check that finds no newer release just refreshes the cache and returns,
-// again without reaching the install/re-exec path.
+// again without reaching the install path.
 func TestAutoUpdateDueCheckSkipsInstallWhenUpToDate(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", tmpDir)
